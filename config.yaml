@@ -1,0 +1,12 @@
+class_overrides: {}
+field_prefix: ""
+package_name_override: ""
+project_name_override: ""
+post_hooks: []
+client_name: "Client"
+meta_type: "poetry"
+file_encoding: "utf-8"
+use_path_prefixes_for_title_model_names: true
+force_keyword_arguments: false
+content_type_overrides: {}
+literal_enums: true

@@ -1,0 +1,28 @@
+{
+  "antennas": [
+    2
+  ],
+  "query":{
+    "session": "S0",
+    "target": "AB"
+  },
+  "linkProfile": 3,
+  "reportFilter": {
+    "duration": 0,
+    "type": "RADIO_WIDE"
+  },
+  "tagMetaData": [
+    "ANTENNA",
+    "RSSI",
+    "CHANNEL",
+    "PC",
+    "XPC",
+    "CRC",
+    "SEEN_COUNT",
+    "PHASE"
+  ],
+  "transmitPower": [
+    26.0
+  ],
+  "type": "CUSTOM"
+}

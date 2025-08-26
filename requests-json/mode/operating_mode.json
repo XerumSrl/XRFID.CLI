@@ -1,0 +1,63 @@
+{
+  "filter": {
+    "match": "prefix",
+    "operation": "include",
+    "value": "7e0a00024010495042090087"
+  },
+  "modeSpecificSettings": {
+    "advancedConfig": {
+      "background_processing_interval_seconds": 0.5,
+      "confirm_direction_with_final_zone": false,
+      "debug_level": "INFO",
+      "direction_lookback_seconds": 5.0,
+      "hysteresis_feet": 2.0,
+      "ma_duration_seconds": 3.0,
+      "max_tags_limit": 2000,
+      "raw_location_conf_threshold": 50,
+      "regression_extrapolation_multiplier": 1.0,
+      "regression_min_duration_seconds": 0.75,
+      "regression_min_n": 3,
+      "regression_slope_threshold": 0.0,
+      "report_direction": [
+        "IN",
+        "OUT",
+        "NONE",
+        "UNKNOWN",
+        "ERROR"
+      ],
+      "report_location_history": false,
+      "report_new": true,
+      "report_raw": true,
+      "report_timed_out": true,
+      "report_transition": true,
+      "report_update_duration_seconds": -1.0,
+      "report_zone_history": false,
+      "sigma_multiplier": 5,
+      "tag_timeout_seconds_default": 20.0,
+      "tag_timeout_seconds_max": 30.0,
+      "tag_timeout_seconds_min": 10.0,
+      "user_defined": "{}"
+    },
+    "basicConfig": {
+      "beamConfig": {
+        "density": {
+          "polarization": "LHCP",
+          "type": "DEFAULT"
+        }
+      },
+      "innerZoneWidth": 10.0,
+      "orientation": 90.0,
+      "readerHeight": 15.0,
+      "tagHeight": 3.0,
+      "zoneExtension": 0.0,
+      "zoneNames": [
+        "Entrance",
+        "Exit",
+        "Left",
+        "Right"
+      ],
+      "zonePlan": 4
+    }
+  },
+  "type": "DIRECTIONALITY"
+}

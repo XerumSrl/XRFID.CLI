@@ -1,0 +1,12 @@
+{
+  "reportFilter": {
+    "duration": 0,
+    "type": "RADIO_WIDE"
+  },
+  "tagMetaData": [
+    "ANTENNA",
+    "RSSI",
+    "SEEN_COUNT"
+  ],
+  "type": "SIMPLE"
+}

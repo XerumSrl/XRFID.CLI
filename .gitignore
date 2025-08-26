@@ -1,0 +1,56 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+*.pyo
+*.pyd
+*.db
+*.sqlite3
+*.log
+*.pot
+*.mo
+*.env
+.env*
+.venv/
+venv/
+ENV/
+env/
+
+# VS Code
+.vscode/
+
+# Test & Coverage
+.coverage
+.tox/
+.nox/
+.pytest_cache/
+htmlcov/
+
+# Jupyter
+.ipynb_checkpoints
+
+# Mac/Linux/Windows
+.DS_Store
+Thumbs.db
+
+# Backup
+*.bak
+
+# Others
+*.orig
+*.swp
+*.swo
+
+# Export
+*.csv
+
+# Ignore docs build
+/docs/_build/
+
+# API responses folder - ignored entirely (created dynamically by application)
+api-responses/
