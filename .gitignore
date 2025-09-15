@@ -54,3 +54,11 @@ Thumbs.db
 
 # API responses folder - ignored entirely (created dynamically by application)
 api-responses/
+
+# Record and Reports folder - ignored entirely (created dynamically by application)
+record/
+reports/
+
+# Logs folder - ignored entirely (created dynamically by application)
+# As of now it only logs WebSocket errors into a Logs/ws-errors-reports folder and only if in debug
+logs/

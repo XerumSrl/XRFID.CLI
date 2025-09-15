@@ -341,6 +341,7 @@ class AppContext:
         self.protocol = "https"  # Default protocol
         self.preferred_protocol = None  # Protocol that worked - persists after login
         self.is_fxr90 = False  # Boolean flag to indicate if the connected reader is FXR90
+        self.is_atr7000 = False  # Boolean flag to indicate if the connected reader is ATR7000
 
         # Permanent WebSocket connection
         self.ws_listener = None
@@ -571,9 +572,16 @@ class AppContext:
                                     if model == "FXR90":
                                         self.is_fxr90 = True
                                         print(f"✅ Detected FXR90 reader (Model: {model})")
-                                    else:
+                                    else:                                        
                                         self.is_fxr90 = False
-                                        print(f"ℹ️  Detected {model} reader (not FXR90)")
+                                        
+                                        # Check if it's an ATR model
+                                        if "ATR" in model or "atr" in model:
+                                            self.is_atr7000 = True
+                                            print(f"✅ Detected ATR reader (Model: {model})")
+                                        else:
+                                            self.is_atr7000 = False
+                                            print(f"ℹ️  Detected {model} reader (not FXR90 or ATR)")
                                         
                                     if self.debug:
                                         print(f"[DEBUG] Version info: {version_data}")
@@ -658,8 +666,16 @@ class AppContext:
         if not self.rest_client:
             raise ValueError('Connection not established. Please run the "connect" command first.')
         
-        # If reader FXR90 try HTTPS directly
-        if self.is_fxr90:
+        # Check if WebSocket Listener is running
+        if self.is_websocket_running():
+            # Start WebSocket recording if listener is initialized
+            self.ws_listener.start_recording()
+        else:
+            print("WebSocketListener not initialized, not starting recording.")
+            print("This reading session will not create CSVs and report files.")
+
+        # If reader FXR90 try HTTPS directly (can't set HTTP mode for FXR90, so no point trying HTTP first)
+        if self.is_fxr90:            
             result = self.rest_client.start_scan()
             if result:
                 return result
@@ -668,8 +684,7 @@ class AppContext:
             if self.rest_client_http:
                 result = self.rest_client_http.start_scan()
                 if result:
-                    return result
-            
+                    return result            
             # Fallback to HTTPS if HTTP doesn't work
             return self.rest_client.start_scan()
     
@@ -678,8 +693,18 @@ class AppContext:
         if not self.rest_client:
             raise ValueError('Connection not established. Please run the "connect" command first.')
         
+        # Check if WebSocket Listener is running
+        if self.is_websocket_running():
+            if self.ws_listener.ws_recorder_active:
+                # Stop WebSocket recording if listener is initialized and recording active
+                self.ws_listener.stop_recording()
+            else:
+                print("WebSocketListener initialized but not recording.")
+        else:
+            print("WebSocketListener not running, recording not stopped.")
+
         # If reader FXR90 try HTTPS directly
-        if self.is_fxr90:
+        if self.is_fxr90:            
             result = self.rest_client.stop_scan()
             if result:
                 return result
@@ -688,8 +713,7 @@ class AppContext:
             if self.rest_client_http:
                 result = self.rest_client_http.stop_scan()
                 if result:
-                    return result
-            
+                    return result            
             # Fallback to HTTPS if HTTP doesn't work
             result = self.rest_client.stop_scan()
             if result:
@@ -846,7 +870,8 @@ class AppContext:
         self.ws_listener = None
         self.ws_data_queue = None
         self.ws_stop_event = None
-        
+        self.ws_recorder_active = False
+
         print("✅ WebSocket stopped and cleaned up")
     
     def force_reset_websocket(self):
@@ -867,6 +892,7 @@ class AppContext:
         # Clear all WebSocket state
         self.ws_data_queue = None
         self.ws_stop_event = None
+        self.ws_recorder_active = False
         
         # Small delay to let server-side connections timeout
         import time

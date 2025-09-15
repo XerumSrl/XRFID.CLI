@@ -121,6 +121,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `p` / `plot`: RSSI visualization
 - `r` / `restapi`: REST API submenu
 - `a` / `atr`: ATR7000 localization submenu
+- `ex` / `export`: Export collected data to PDF
 - `i` / `iotc`: IoT Connector setup
 - `di` / `disconnectIOTC`: Disconnect IOTC
 - `c` / `clear`: Clear screen

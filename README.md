@@ -139,7 +139,8 @@ For development and testing, all dependencies are pinned in `requirements-freeze
 - **🌐 IoT Connector (IOTC)**: Complete setup and cloud connection management for both WebSocket or MQTT endpoints
 - **📋 Real-Time Monitoring**: Tag table with full statistics and export
 - **📊 Data Visualization**: Real-time RSSI graphs (terminal and GUI)
-- **📍 ATR7000 Localization**: Complete positional tracking system
+- **📄 PDF Report Generation**: Professional reports with RSSI graphs, antenna analysis (standard readers), and position analysis (ATR7000)
+- **�📍 ATR7000 Localization**: Complete positional tracking system
 - **🎧 WebSocket Listener**: Real-time tag events with robust fallback
 - **🔧 REST API Submenu**: Interact directly with the main reader API endpoint for advanced operations and diagnostics
 
@@ -162,6 +163,7 @@ For development and testing, all dependencies are pinned in `requirements-freeze
 │ m / monitoring 📋 Tag table                                 │
 │ p / plot       📊 RSSI graph                                │
 │ a / atr        📍 ATR7000 - Localization (submenu)          │
+│ ex / export    📤 Export collected data to PDF reports      │
 ├─────────────────────────────────────────────────────────────┤
 │ IOT CONNECTOR (IOTC):                                       │
 │ i / iotc       🌐 Setup IoT Connector                       │
@@ -235,7 +237,147 @@ i -type mqtt -hostname <BROKER-IP> -readername <READER-NAME> -endpointname <ENDP
 #### **FXR90 Readers**
 For FXR90 readers, the CLI automatically detects the reader type and uses direct REST API configuration instead of the standard IOTC XML commands.
 
-## 📍 ATR7000 Localization
+## 📄 PDF Report Generation
+
+Transform your recorded RFID data into professional PDF reports with comprehensive analysis and visualization.
+
+### **🎯 Core Features**
+- **Automated Report Generation**: Convert CSV recording data into professional PDF reports
+- **RSSI Time-Series Analysis**: Individual graphs for each EPC showing signal strength over time
+- **ATR7000 Position Analysis**: Dedicated position variation graphs for ATR7000 readers
+- **Antenna Statistics**: Detailed antenna analysis for standard RFID readers (non-ATR)
+- **Statistical Summary**: Complete overview with tag counts, read events, and collection periods
+- **Multi-Source Data Integration**: Combines tag statistics from `/record/tag_reads/` with raw-messages data from `/record/messages/`
+
+### **📊 Report Contents**
+
+#### **Title Page**
+- **Report Header**: "RFID Tag Analysis Report" with generation timestamp
+- **Source Files**: Lists both CSV files used (tag data and message data)
+- **Summary Statistics**: 
+  - Total unique tags detected
+  - Total read events with comma formatting
+  - Average RSSI across all tags
+  - Data collection time period
+
+#### **Standard RFID Reader Pages (Non-ATR)**
+Each detected EPC gets **one page** containing:
+- **Tag Statistics Section**:
+  - Complete EPC identifier
+  - Total read count for the tag
+  - RSSI statistics (average, minimum, maximum)
+  - First and last detection timestamps
+  - Read rate per minute
+  - **Antenna Analysis**: Detailed breakdown by antenna with read counts and RSSI stats per antenna
+- **RSSI Time-Series Graph**:
+  - Line plot with scatter points showing RSSI values over time
+  - Time axis formatted as HH:MM:SS with minute intervals
+  - Statistical overlay box with key metrics
+  - Grid lines for easy reading
+
+#### **ATR7000 Reader Pages**
+Each detected EPC gets **two pages** for optimal spacing and readability:
+
+**Page 1: Statistics and RSSI Analysis**
+- **Tag Statistics Section**:
+  - Complete EPC identifier
+  - Total read count and RSSI statistics
+  - First/last detection timestamps
+  - Read rate per minute
+  - *(Note: Antenna analysis skipped for ATR7000 readers)*
+- **RSSI Time-Series Graph**:
+  - Large, detailed RSSI plot over time
+  - Enhanced spacing for better readability
+
+**Page 2: Position Analysis** *(ATR7000 Only)*
+- **X Position Variation Graph**:
+  - X coordinate changes over time
+  - Statistical info box (points count, range, mean)
+  - High-precision timestamp plotting
+- **Y Position Variation Graph**:
+  - Y coordinate changes over time
+  - Statistical info box (points count, range, mean)
+  - Time axis with proper formatting and rotation
+
+### **🔧 Usage Instructions**
+
+#### **Step 1: Record Data**
+Before generating reports, you need to collect tag data using the start/stop scan cycle:
+
+**Prerequisites:**
+- Ensure WebSocket IOTC setup is configured: `i -type ws` (if not already done)
+
+**Data Collection Process:**
+```bash
+s   # Start scanning - begins collecting tag data
+    # ... let the reader collect tags for desired duration ...
+x   # Stop scanning - automatically saves data to CSV files
+```
+
+**What happens automatically:**
+- Tag statistics are saved to `/record/tag_reads/tags_read_YYYYMMDD_HHMMSS.csv`
+- Raw message data is saved to `/record/messages/messages_read_YYYYMMDD_HHMMSS.csv`
+- Both files use the same timestamp for easy correlation
+
+#### **Step 2: Generate Report**
+```bash
+# From main menu
+ex  # or 'export'
+```
+
+#### **Step 3: Select Data File**
+- CLI displays all available CSV files from `/record/tag_reads/`
+- Files are sorted with newest first
+- Readable timestamps shown for easy selection
+- Enter the number corresponding to your desired dataset
+
+#### **Step 4: Report Generation**
+The CLI automatically:
+- **Detects reader type** from message data (ATR7000 vs standard RFID)
+- **Processes tag statistics** and message data from the two csv auto generated on read start/stop cycles
+- **Generates appropriate layout**:
+  - Standard readers: 1 page per EPC with antenna analysis
+  - ATR7000 readers: 2 pages per EPC with position analysis
+- **Creates position data** (ATR7000 only) by processing RAW_DIRECTIONALITY messages
+- **Saves PDF** to `/reports/` directory with format: `report_YYYYMMDD_HHMMSS.pdf`
+- **Shows progress indicators** during processing
+- **Confirms success** with complete file path
+
+### **📈 Advanced Features**
+
+#### **Reader Type Detection**
+The CLI automatically analyzes message data to detect:
+- **ATR7000 Indicators**: `DIRECTIONALITY_RAW` messages, azimuth/elevation fields, `rssi` field
+- **Standard RFID Indicators**: `CUSTOM` messages, antenna fields, `peakRssi` field, standard RFID fields
+- **Adaptive Processing**: Different analysis paths based on detected reader type
+
+#### **Position Data Processing (ATR7000)**
+For ATR7000 readers, the system:
+- **Extracts timestamps** from JSON message content (not CSV row timestamps)
+- **Processes RAW_DIRECTIONALITY** messages with azimuth/elevation data
+- **Calculates Cartesian coordinates** using position calculation algorithms
+- **Generates time-series data** for X and Y coordinate variations
+- **Creates statistical summaries** (point count, coordinate ranges, mean positions)
+
+#### **Layout Optimization**
+- **Custom GridSpec layouts** with proper height ratios and spacing
+- **No matplotlib warnings** - eliminated tight_layout conflicts
+- **Optimized for print** - professional formatting suitable for reports
+- **Consistent styling** across all pages and reader types
+
+### **📁 File Structure**
+```
+project_root/
+├── record/
+│   ├── tag_reads/          # Tag statistics CSV files
+│   │   └── tags_read_20241201_143022.csv
+│   └── messages/           # Raw message CSV files
+│       └── messages_read_20241201_143022.csv
+├── reports/                # Generated PDF reports
+│   └── report_20241201_143022.pdf
+```
+
+## �📍 ATR7000 Localization
 
 Advanced positional tracking system using RAW_DIRECTIONALITY messages from ATR7000 readers to calculate precise tag positions in Cartesian coordinates (X, Y, Z).
 
@@ -277,15 +419,16 @@ For full details on available features and commands, see [API-SUBMENU-README.md]
 
 ## 🎯 Typical Workflow
 
-1. **Connect**: `l` for automatic login or `k` for manual connection
+1. **Connect**: `l` for automatic login and connection
 2. **Setup IOTC** (if needed): `i` for complete configuration
-3. **Start Scan**: `v` to begin reading tags
+3. **Start Scan**: `s` to begin reading tags
 4. **Monitor**:
-   - `t` for complete table with statistics
+   - `m` for complete table with statistics
    - `p` for RSSI graph in window
    - `a` for ATR7000 localization
-5. **Stop**: `f` to stop scanning
-6. **Disconnect**: `d` to close the session
+5. **Export**: `ex` to generate professional PDF reports from recorded data
+6. **Stop**: `x` to stop scanning
+7. **Disconnect**: `d` to close the session
 
 ## 🏗️ Technical Architecture
 
@@ -308,6 +451,7 @@ For full details on available features and commands, see [API-SUBMENU-README.md]
 - **[Basic Operations](docs/user-guide/basic-operations.md)** - Essential workflows and commands
 - **[IoT Connector Setup](docs/user-guide/iotc-setup.md)** - WebSocket and MQTT configuration
 - **[Tag Monitoring](docs/user-guide/tag-monitoring.md)** - Real-time visualization and data export
+- **[Read Data Collection to CSV](docs/user-guide/csv-recording.md)** - Automatically created .csv files on start/stop read cycles
 - **[ATR7000 Localization](docs/user-guide/atr7000-localization.md)** - Advanced position tracking
 
 ### 🔧 Advanced Topics
@@ -359,6 +503,10 @@ XRFID-Test-CLI/
 ├── tests/                           # Test suite
 │   ├── test_api_submenu.py          # API submenu tests
 │   └── __pycache__/                 # Test bytecode cache
+├── record/                          # Data recording directory
+│   ├── tag_reads/                   # Tag statistics CSV files
+│   └── messages/                    # Raw message CSV files
+├── reports/                         # Generated PDF reports
 ├── main.py                          # Main entry point (if present)
 ├── xrcli_entrypoint.py              # CLI entrypoint
 ├── requirements.txt                 # Python dependencies

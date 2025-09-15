@@ -5,18 +5,33 @@ import os
 import sys
 import time
 import json
+import csv
+import traceback
 from typing import Optional
+from datetime import datetime
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 import getpass
 import requests
 import urllib3
+import queue
+import threading
+import numpy as np
 
 from zebra_cli.context import AppContext
 from zebra_cli.plotter import Plotter, EnhancedPlotter
 from zebra_cli.tag_table_window import TagTableWindow
-
 from zebra_cli.api_submenu import ApiSubmenu
-import queue
-import threading
+from zebra_cli.atr_submenu import PositionPoint, PointDataStore, ATR7000PositionCalculator, RawDirectionalityMessage
+
+# Optional dependencies with graceful fallbacks
+try:
+    import matplotlib.pyplot as plt
+    import matplotlib.dates as mdates
+    from matplotlib.backends.backend_pdf import PdfPages
+    MATPLOTLIB_AVAILABLE = True
+except ImportError:
+    MATPLOTLIB_AVAILABLE = False
 
 # Import of converted IOTC functions
 try:
@@ -31,7 +46,6 @@ class InteractiveCLI:
 
     def __init__(self, debug: bool = False, pre_commands: Optional[list[str]] = None):
         # Step 1: Set code page to UTF-8 on Windows for Unicode support
-        import sys, os
         if os.name == 'nt':
             try:
                 os.system('chcp 65001 >nul')
@@ -54,7 +68,6 @@ class InteractiveCLI:
         
     def _supports_unicode(self) -> bool:
         """Detects if the terminal likely supports Unicode borders and wide characters."""
-        import sys, os
         # Windows terminals with chcp 65001, modern Linux/macOS terminals, and VSCode terminals usually support Unicode
         if sys.platform == 'win32':
             try:
@@ -159,6 +172,7 @@ class InteractiveCLI:
         print(row("m  / monitoring    📋    Tag table"))
         print(row("p  / plot          📊    RSSI plot "))
         print(row("a  / atr           📍    ATR7000 - Localization (submenu)"))
+        print(row("ex  / export       📤    Export collected data to pdf"))
         print(sep)
         print(row("IOT CONNECTOR (IOTC):"))
         print(row("i  / iotc          🌐    IoT Connector setup (+ parameters)"))
@@ -376,7 +390,6 @@ class InteractiveCLI:
         except Exception as e:
             if self.debug:
                 print(f"[DEBUG] handle_start_scan - Exception: {e}")
-                import traceback
                 traceback.print_exc()
             print(f"❌ Start error: {e}")
         
@@ -833,6 +846,12 @@ class InteractiveCLI:
         print("  • MQTT setup: i -type mqtt -hostname <broker> -readername <name> -endpointname <endpoint>")
         print("  • Example: i -type mqtt -hostname mqtt.broker.com -readername MyReader -endpointname MQTT_CLI")
         print()
+        print("EXPORT FUNCTIONALITY:")
+        print("  • Use 'ex' or 'export' to create PDF reports from recorded data")
+        print("  • Exports CSV files from /record/tag_reads/ to PDF in /reports/")
+        print("  • Includes RSSI graphs over time for each EPC")
+        print("  • Requires matplotlib: pip install matplotlib")
+        print()
         print("TROUBLESHOOTING:")
         print("  • Ensure reader is powered on and reachable")
         print("  • Credentials are usually admin/admin")
@@ -1015,7 +1034,6 @@ class InteractiveCLI:
     
     def cleanup_all_resources(self):
         """Cleans all resources before application shutdown"""
-        import time  # Explicit import to ensure availability in function scope
         print("🧹 Resource cleanup in progress...")
         
         try:
@@ -1052,8 +1070,8 @@ class InteractiveCLI:
             # 5. Close plotters if present
             # If there are open matplotlib windows, close them
             try:
-                import matplotlib.pyplot as plt
-                plt.close('all')
+                if MATPLOTLIB_AVAILABLE:
+                    plt.close('all')
             except:
                 pass
             
@@ -1084,7 +1102,6 @@ class InteractiveCLI:
     
     def run(self):
         """Main loop of the interactive CLI"""
-        import time  # Explicit import to ensure availability in function scope
         print("🚀 Starting XRFID CLI...")
         time.sleep(1)
         command_map = {
@@ -1097,6 +1114,7 @@ class InteractiveCLI:
             'm': self.handle_unified_monitoring, 'monitoring': self.handle_unified_monitoring,
             'p': self.handle_plot_live_gui_enhanced, 'plot': self.handle_plot_live_gui_enhanced,
             'a': self.handle_atr7000_submenu, 'atr': self.handle_atr7000_submenu,
+            'ex': self.handle_export_data, 'export': self.handle_export_data,
             'i': self.handle_iotc_setup_ws, 'iotc': self.handle_iotc_setup_ws,
             'di': self.handle_iotc_disconnect, 'disconnectIOTC': self.handle_iotc_disconnect,
             'c': lambda: None, 'clear': lambda: None,
@@ -1154,8 +1172,6 @@ class InteractiveCLI:
         print("🎧 Listening for tag events. Press ENTER to stop.")
         print("--------------------------------------------------")
 
-        import threading
-        import sys
         stop_event = threading.Event()
 
         def input_thread():
@@ -1178,7 +1194,6 @@ class InteractiveCLI:
                         antenna = tag_data.get('antenna', 'N/A')
                         timestamp = data.get('timestamp', 'N/A')
                         print(f"📡 Tag: {tag_id} | RSSI: {rssi}dBm | Ant: {antenna} | Time: {timestamp}")
-                import time
                 time.sleep(0.1)
         except Exception as e:
             print(f"❌ Error during WebSocket listening: {e}")
@@ -1190,7 +1205,6 @@ class InteractiveCLI:
         """Delegates ATR menu handling to the separate AtrSubmenu class."""
         self.ensure_no_background_listeners()
         if not hasattr(self, 'atr_submenu'):
-            from zebra_cli.atr_submenu import AtrSubmenu
             self.atr_submenu = AtrSubmenu(self)
         self.atr_submenu.handle_submenu()
     
@@ -1378,6 +1392,1459 @@ class InteractiveCLI:
         
         input("\n⏸️  Press ENTER to continue...")
 
+    # Data Export #
+
+    def handle_export_data(self):
+        """Exports CSV data to PDF report with RSSI graphs for each EPC"""
+        print("\n📤 EXPORT CSV DATA TO PDF REPORT")
+        print("-" * 40)
+        
+        try:
+            # Get project root directory
+            project_root = os.path.dirname(os.path.dirname(__file__))
+            tag_reads_dir = os.path.join(project_root, 'record', 'tag_reads')
+            messages_dir = os.path.join(project_root, 'record', 'messages')
+            reports_dir = os.path.join(project_root, 'reports')
+            
+            # Check if tag_reads directory exists
+            if not os.path.exists(tag_reads_dir):
+                print("❌ No tag reads directory found")
+                print(f"   Expected: {tag_reads_dir}")
+                print("💡 Record some data first using monitoring commands")
+                input("\n⏸️  Press ENTER to continue...")
+                return
+            
+            # Get list of CSV files in tag_reads directory
+            csv_files = [f for f in os.listdir(tag_reads_dir) if f.endswith('.csv')]
+            
+            if not csv_files:
+                print("❌ No CSV files found in tag reads directory")
+                print(f"   Directory: {tag_reads_dir}")
+                print("💡 Record some data first using monitoring commands")
+                input("\n⏸️  Press ENTER to continue...")
+                return
+            
+            # Sort files by name (newest first due to timestamp format)
+            csv_files.sort(reverse=True)
+            
+            # Display available files
+            print("📋 Available CSV files for export:")
+            print("-" * 35)
+            for i, filename in enumerate(csv_files, 1):
+                # Extract timestamp from filename for display
+                if 'tags_read_' in filename:
+                    timestamp_part = filename.replace('tags_read_', '').replace('.csv', '')
+                    try:
+                        # Parse timestamp to readable format
+                        dt = datetime.strptime(timestamp_part, '%Y%m%d_%H%M%S')
+                        readable_time = dt.strftime('%Y-%m-%d %H:%M:%S')
+                        print(f"  {i}. {filename} ({readable_time})")
+                    except:
+                        print(f"  {i}. {filename}")
+                else:
+                    print(f"  {i}. {filename}")
+            
+            # Get user choice
+            while True:
+                try:
+                    choice = input(f"\n📝 Select file to export (1-{len(csv_files)}): ").strip()
+                    if not choice:
+                        print("❌ Export cancelled")
+                        input("\n⏸️  Press ENTER to continue...")
+                        return
+                    
+                    choice_idx = int(choice) - 1
+                    if 0 <= choice_idx < len(csv_files):
+                        selected_file = csv_files[choice_idx]
+                        break
+                    else:
+                        print(f"❌ Please enter a number between 1 and {len(csv_files)}")
+                except ValueError:
+                    print("❌ Please enter a valid number")
+            
+            print(f"\n✅ Selected: {selected_file}")
+            
+            # Generate PDF report
+            self._generate_pdf_report(selected_file, tag_reads_dir, messages_dir, reports_dir)
+            
+        except Exception as e:
+            print(f"❌ Export error: {e}")
+            if self.debug:
+                traceback.print_exc()
+        
+        input("\n⏸️  Press ENTER to continue...")
+    
+    def _generate_pdf_report(self, csv_filename: str, tag_reads_dir: str, messages_dir: str, reports_dir: str):
+        """Generates PDF report from CSV data with RSSI graphs"""
+        try:
+            # Check if matplotlib is available for PDF generation
+            if not MATPLOTLIB_AVAILABLE:
+                print("❌ Missing required library: matplotlib")
+                print("💡 Install required packages: pip install matplotlib")
+                return
+            
+            # Create reports directory if it doesn't exist
+            os.makedirs(reports_dir, exist_ok=True)
+            
+            # Extract timestamp from filename to find corresponding messages file
+            timestamp_part = csv_filename.replace('tags_read_', '').replace('.csv', '')
+            messages_filename = f"messages_read_{timestamp_part}.csv"
+            messages_path = os.path.join(messages_dir, messages_filename)
+            
+            # Generate PDF filename with report_ prefix and timestamp
+            pdf_filename = f"report_{timestamp_part}.pdf"
+            pdf_path = os.path.join(reports_dir, pdf_filename)
+            
+            print(f"📊 Generating PDF report: {pdf_filename}")
+            print(f"🔍 Reading tag data from: {csv_filename}")
+            print(f"🔍 Reading message data from: {messages_filename}")
+            
+            # Read tag data
+            tag_data = {}
+            tags_path = os.path.join(tag_reads_dir, csv_filename)
+            
+            with open(tags_path, 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    epc = row['EPC']
+                    tag_data[epc] = {
+                        'reads': int(row['Reads']),
+                        'avg_rssi': float(row['Avg_RSSI']),
+                        'min_rssi': float(row['Min_RSSI']),
+                        'max_rssi': float(row['Max_RSSI']),
+                        'first_seen': row['First_Seen'],
+                        'last_seen': row['Last_Seen'],
+                        'rate_per_minute': float(row['Rate_Per_Minute'])
+                    }
+            
+            print(f"📋 Found {len(tag_data)} unique tags in dataset")
+            
+            # Read messages data to extract RSSI over time and antenna counts for each EPC
+            epc_rssi_data = {}
+            epc_antenna_counts = {}
+            epc_antenna_rssi_stats = {}  # {epc: {antenna_id: {'min': val, 'max': val, 'sum': val, 'count': count}}}
+            
+            if os.path.exists(messages_path):
+                # Detect if this is an ATR7000 reader
+                is_atr_reader = self._is_messages_csv_from_atr(messages_path)
+                reader_type = "ATR7000" if is_atr_reader else "Standard RFID"
+                print(f"� Detected {reader_type} reader from message data")
+                
+                if is_atr_reader:
+                    print("�📡 Processing message data for RSSI graphs (ATR7000 - antenna analysis skipped)")
+                else:
+                    print("📡 Processing message data for RSSI graphs and antenna analysis...")
+            
+                with open(messages_path, 'r', encoding='utf-8') as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        try:
+                            # Parse the raw JSON message
+                            raw_json = row['Raw_JSON']
+                            message_data = json.loads(raw_json)
+                            
+                            # Extract tag data from message
+                            if isinstance(message_data, dict) and 'data' in message_data:
+                                msg_tag_data = message_data['data']
+                                if isinstance(msg_tag_data, dict) and 'idHex' in msg_tag_data:
+                                    epc = msg_tag_data['idHex']
+                                    rssi = msg_tag_data.get('peakRssi', msg_tag_data.get('rssi'))
+                                    antenna = msg_tag_data.get('antenna')
+                                    
+                                    if epc in tag_data:  # Only process if this EPC is in our tag data
+                                        # Process RSSI data for graphs
+                                        if rssi is not None:
+                                            try:
+                                                rssi_value = float(rssi)
+                                                timestamp_str = row['Timestamp']
+                                                timestamp = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S.%f')
+                                                
+                                                if epc not in epc_rssi_data:
+                                                    epc_rssi_data[epc] = {'timestamps': [], 'rssi_values': []}
+                                                
+                                                epc_rssi_data[epc]['timestamps'].append(timestamp)
+                                                epc_rssi_data[epc]['rssi_values'].append(rssi_value)
+                                            except (ValueError, TypeError):
+                                                pass  # Skip invalid RSSI values
+                                        
+                                        # Process antenna count and RSSI statistics data (only for non-ATR readers)
+                                        if not is_atr_reader and antenna is not None:
+                                            try:
+                                                antenna_id = int(antenna)
+                                                
+                                                # Initialize antenna counts data structure
+                                                if epc not in epc_antenna_counts:
+                                                    epc_antenna_counts[epc] = {}
+                                                if antenna_id not in epc_antenna_counts[epc]:
+                                                    epc_antenna_counts[epc][antenna_id] = 0
+                                                
+                                                # Update antenna read count
+                                                epc_antenna_counts[epc][antenna_id] += 1
+                                                
+                                                # Process RSSI statistics if available
+                                                if rssi is not None:
+                                                    try:
+                                                        rssi_value = float(rssi)
+                                                        
+                                                        # Initialize RSSI stats data structure
+                                                        if epc not in epc_antenna_rssi_stats:
+                                                            epc_antenna_rssi_stats[epc] = {}
+                                                        if antenna_id not in epc_antenna_rssi_stats[epc]:
+                                                            epc_antenna_rssi_stats[epc][antenna_id] = {
+                                                                'min': rssi_value,
+                                                                'max': rssi_value,
+                                                                'sum': 0,
+                                                                'count': 0
+                                                            }
+                                                        
+                                                        # Update RSSI statistics
+                                                        stats = epc_antenna_rssi_stats[epc][antenna_id]
+                                                        stats['min'] = min(stats['min'], rssi_value)
+                                                        stats['max'] = max(stats['max'], rssi_value)
+                                                        stats['sum'] += rssi_value
+                                                        stats['count'] += 1
+                                                        
+                                                    except (ValueError, TypeError):
+                                                        pass  # Skip invalid RSSI values
+                                                
+                                            except (ValueError, TypeError):
+                                                pass  # Skip invalid antenna values
+                                                
+                        except (json.JSONDecodeError, KeyError):
+                            continue
+            else:
+                print(f"⚠️  Messages file not found: {messages_filename}")
+                print("📊 Will generate report without RSSI graphs and antenna analysis")
+                is_atr_reader = False  # Default to non-ATR behavior when no messages file
+            
+            # Process ATR7000 position data if this is an ATR reader
+            atr_point_store = None
+            if is_atr_reader and os.path.exists(messages_path):
+                try:
+                    print("📍 Processing ATR7000 position data for XY variation analysis...")
+                    atr_point_store = self.process_atr7000_messages_csv(messages_path)
+                    if atr_point_store:
+                        print(f"✅ ATR7000 position data processed successfully")
+                    else:
+                        print("⚠️  No position data found in ATR7000 messages")
+                except Exception as e:
+                    print(f"⚠️  Error processing ATR7000 position data: {e}")
+                    if self.debug:
+                        traceback.print_exc()
+            
+            # Generate PDF report
+            print("📄 Creating PDF report...")
+            
+            with PdfPages(pdf_path) as pdf:
+                # Title page
+                fig, ax = plt.subplots(figsize=(8.5, 11))
+                ax.axis('off')
+                
+                # Title
+                ax.text(0.5, 0.9, 'RFID Tag Analysis Report', 
+                       ha='center', va='center', fontsize=24, fontweight='bold')
+                
+                # Source files information (left aligned)
+                source_files_text = f'Generated from:\n  • Tag data: {csv_filename}\n  • Message data: {messages_filename}'
+                ax.text(0.1, 0.82, source_files_text, 
+                       ha='left', va='top', fontsize=12)
+                
+                # Generation time (left aligned with vertical spacing)
+                generation_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                ax.text(0.1, 0.72, f'Report generated: {generation_time}', 
+                       ha='left', va='center', fontsize=12)
+                
+                # Summary statistics
+                total_tags = len(tag_data)
+                total_reads = sum(data['reads'] for data in tag_data.values())
+                avg_rssi_overall = sum(data['avg_rssi'] for data in tag_data.values()) / total_tags if total_tags > 0 else 0
+                
+                summary_text = f"""Summary Statistics:
+• Total Unique Tags: {total_tags}
+• Total Read Events: {total_reads:,}
+• Average RSSI: {avg_rssi_overall:.1f} dBm
+• Data Collection Period: {tag_data[list(tag_data.keys())[0]]['first_seen'] if tag_data else 'N/A'} 
+  to {tag_data[list(tag_data.keys())[0]]['last_seen'] if tag_data else 'N/A'}"""
+                
+                ax.text(0.1, 0.55, summary_text, ha='left', va='center', fontsize=12,
+                       bbox=dict(boxstyle="round,pad=0.5", facecolor="lightgray"))
+                
+                pdf.savefig(fig, bbox_inches='tight')
+                plt.close(fig)
+                
+                # Generate page(s) for each EPC
+                for i, (epc, data) in enumerate(tag_data.items(), 1):
+                    print(f"📊 Processing EPC {i}/{len(tag_data)}: {epc[:16]}...")
+                    
+                    # Generate Page 1: Statistics and RSSI graph (same for all readers)
+                    self._generate_stats_and_rssi_page(
+                        epc, data, epc_rssi_data, is_atr_reader, 
+                        epc_antenna_counts, epc_antenna_rssi_stats, pdf
+                    )
+                    
+                    # Generate Page 2: Position graphs (only for ATR readers with position data)
+                    if is_atr_reader and atr_point_store is not None:
+                        print(f"📍 Generating position graphs page for EPC: {epc[:16]}...")
+                        self._generate_position_graphs_page(epc, atr_point_store, pdf)
+            
+            print(f"✅ PDF report generated successfully!")
+            print(f"📄 Report saved: {pdf_path}")
+            print(f"📊 {len(tag_data)} tags processed with detailed analysis")
+            
+        except ImportError as e:
+            print(f"❌ Missing required library: {e}")
+            print("💡 Install required packages: pip install matplotlib")
+        except Exception as e:
+            print(f"❌ Error generating PDF: {e}")
+            if self.debug:
+                traceback.print_exc()
+
+    def _generate_stats_and_rssi_page(self, epc: str, data: dict, epc_rssi_data: dict, 
+                                     is_atr_reader: bool, epc_antenna_counts: dict, 
+                                     epc_antenna_rssi_stats: dict, pdf):
+        """
+        Generates the first page with tag statistics and RSSI graph (same for all readers).
+        
+        Args:
+            epc: EPC identifier
+            data: Tag statistics data
+            epc_rssi_data: RSSI time series data
+            is_atr_reader: Whether this is an ATR7000 reader
+            epc_antenna_counts: Antenna count data
+            epc_antenna_rssi_stats: Antenna RSSI statistics
+            pdf: PdfPages object to save the figure
+        """
+        try:
+            # Create 3-section layout for better spacing
+            fig = plt.figure(figsize=(8.5, 11))
+            gs = fig.add_gridspec(3, 1, height_ratios=[1, 2, 0.5], hspace=0.3)
+            
+            # EPC Header
+            fig.suptitle(f'Tag Analysis: {epc}', fontsize=16, fontweight='bold', y=0.95)
+            
+            # Statistics section
+            ax1 = fig.add_subplot(gs[0])
+            ax1.axis('off')
+            
+            # Build antenna counts and RSSI statistics text (only for non-ATR readers)
+            antenna_text = ""
+            if not is_atr_reader:
+                if epc in epc_antenna_counts and epc_antenna_counts[epc]:
+                    antenna_counts = epc_antenna_counts[epc]
+                    # Sort antenna IDs for consistent display
+                    sorted_antennas = sorted(antenna_counts.keys())
+                    antenna_lines = []
+                    for ant_id in sorted_antennas:
+                        count = antenna_counts[ant_id]
+                        
+                        # Check if we have RSSI statistics for this antenna
+                        rssi_info = ""
+                        if (epc in epc_antenna_rssi_stats and 
+                            ant_id in epc_antenna_rssi_stats[epc] and
+                            epc_antenna_rssi_stats[epc][ant_id]['count'] > 0):
+                            
+                            stats = epc_antenna_rssi_stats[epc][ant_id]
+                            avg_rssi = stats['sum'] / stats['count']
+                            min_rssi = stats['min']
+                            max_rssi = stats['max']
+                            rssi_info = f" (RSSI: {avg_rssi:.1f} avg, {min_rssi:.1f}/{max_rssi:.1f} min/max)"
+                        
+                        antenna_lines.append(f"  - Antenna {ant_id}: {count:,} reads{rssi_info}")
+                    antenna_text = "\n• Reads by Antenna:\n" + "\n".join(antenna_lines)
+                else:
+                    antenna_text = "\n• Reads by Antenna: No antenna data available"
+            
+            stats_text = f"""
+Tag Statistics:
+• EPC: {epc}
+• Total Reads: {data['reads']:,}
+• Average RSSI: {data['avg_rssi']:.1f} dBm
+• Min/Max RSSI: {data['min_rssi']:.1f} / {data['max_rssi']:.1f} dBm
+• First Seen: {data['first_seen']}
+• Last Seen: {data['last_seen']}
+• Read Rate: {data['rate_per_minute']:.1f} reads/minute{antenna_text}
+            """
+            
+            ax1.text(0.1, 0.8, stats_text, fontsize=11, va='top',
+                    bbox=dict(boxstyle="round,pad=0.5", facecolor="lightblue"))
+            
+            # Add a little bit of spacing
+            ax1.text(0.1, 0.1, " ", fontsize=11, va='top')
+            
+            # RSSI over time graph (section 2)
+            if epc in epc_rssi_data and epc_rssi_data[epc]['timestamps']:
+                ax2 = fig.add_subplot(gs[1])
+                
+                timestamps = epc_rssi_data[epc]['timestamps']
+                rssi_values = epc_rssi_data[epc]['rssi_values']
+                
+                # Sort by timestamp
+                sorted_data = sorted(zip(timestamps, rssi_values))
+                timestamps, rssi_values = zip(*sorted_data)
+                
+                ax2.plot(timestamps, rssi_values, 'b-', linewidth=0.5, alpha=0.3)
+                ax2.scatter(timestamps, rssi_values, c='red', s=5, alpha=0.5)
+
+                # Calculate and plot smooth curve
+                # Savitzky-Golay Filter
+                smooth_info = self._calculate_smooth_curve_savgol(list(timestamps), list(rssi_values))
+
+                if smooth_info:
+                    ax2.plot(smooth_info['timestamps'], smooth_info['coordinates'], 
+                            'green', linewidth=2, linestyle='-', label='RSSI Smooth', alpha=1)
+                    # Only show legend when we have labeled smooth curve
+                    ax2.legend(fontsize=9)
+
+                ax2.set_xlabel('Time')
+                ax2.set_ylabel('RSSI (dBm)')
+                ax2.set_title('RSSI Over Time')
+                ax2.grid(True, alpha=0.3)
+                
+                # Format x-axis with adaptive interval based on data time span
+                ax2.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
+                
+                # Calculate time span from tag data to choose appropriate locator
+                try:
+                    # Try parsing with microseconds first, then without if it fails
+                    try:
+                        first_seen = datetime.strptime(data['first_seen'], '%Y-%m-%d %H:%M:%S.%f')
+                        last_seen = datetime.strptime(data['last_seen'], '%Y-%m-%d %H:%M:%S.%f')
+                    except ValueError:
+                        # Fallback to format without microseconds
+                        first_seen = datetime.strptime(data['first_seen'], '%Y-%m-%d %H:%M:%S')
+                        last_seen = datetime.strptime(data['last_seen'], '%Y-%m-%d %H:%M:%S')
+                    
+                    time_span_seconds = (last_seen - first_seen).total_seconds()
+                    
+                    # Choose appropriate time axis interval based on data duration (time axis markers)
+                    if time_span_seconds <= 10:  # ≤ 10 seconds: show every second
+                        ax2.xaxis.set_major_locator(mdates.SecondLocator(interval=1))
+                    elif time_span_seconds <= 30:  # ≤ 30 seconds: show every 5 seconds
+                        ax2.xaxis.set_major_locator(mdates.SecondLocator(interval=5))
+                    elif time_span_seconds <= 120:  # ≤ 2 minutes: show every 15 seconds
+                        ax2.xaxis.set_major_locator(mdates.SecondLocator(interval=15))
+                    elif time_span_seconds <= 300:  # ≤ 5 minutes: show every 30 seconds
+                        ax2.xaxis.set_major_locator(mdates.SecondLocator(interval=30))
+                    elif time_span_seconds <= 900:  # ≤ 15 minutes: show every minute
+                        ax2.xaxis.set_major_locator(mdates.MinuteLocator(interval=1))
+                    elif time_span_seconds <= 3600:  # ≤ 1 hour: show every 5 minutes
+                        ax2.xaxis.set_major_locator(mdates.MinuteLocator(interval=5))
+                    else:  # > 1 hour: show every 15 minutes
+                        ax2.xaxis.set_major_locator(mdates.MinuteLocator(interval=15))
+                        
+                except (ValueError, TypeError) as e:
+                    # Fallback to adaptive approach based on data points if timestamp parsing fails
+                    if len(timestamps) > 10:
+                        ax2.xaxis.set_major_locator(mdates.SecondLocator(interval=max(1, len(timestamps)//6)))
+                    else:
+                        ax2.xaxis.set_major_locator(mdates.SecondLocator(interval=1))
+                
+                plt.setp(ax2.xaxis.get_majorticklabels(), rotation=45)
+                
+                # Add statistics to graph
+                stats_box = f'Avg: {data["avg_rssi"]:.1f}dBm\nMin: {data["min_rssi"]:.1f}dBm\nMax: {data["max_rssi"]:.1f}dBm'
+                ax2.text(0.02, 0.98, stats_box, transform=ax2.transAxes, fontsize=9,
+                        verticalalignment='top', bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8))
+            else:
+                ax2 = fig.add_subplot(gs[1])
+                ax2.text(0.5, 0.5, 'No RSSI time-series data available\nfor this EPC', 
+                        ha='center', va='center', fontsize=12,
+                        bbox=dict(boxstyle="round,pad=0.5", facecolor="lightyellow"))
+                ax2.set_xlim(0, 1)
+                ax2.set_ylim(0, 1)
+                ax2.axis('off')
+            
+            # Note: Custom GridSpec layout eliminates need for plt.tight_layout()
+            pdf.savefig(fig, bbox_inches='tight')
+            plt.close(fig)
+            
+        except Exception as e:
+            print(f"❌ Error generating stats and RSSI page for EPC {epc}: {e}")
+            if hasattr(self, 'debug') and self.debug:
+                traceback.print_exc()
+
+    def _generate_position_graphs_page(self, epc: str, atr_point_store, pdf):
+        """
+        Generates the second page with X and Y position variation graphs (ATR7000 only).
+        
+        Args:
+            epc: EPC identifier
+            atr_point_store: PointDataStore with position data
+            pdf: PdfPages object to save the figure
+        """
+        try:
+            # Create 2-section layout for position graphs with maximum space
+            fig = plt.figure(figsize=(8.5, 11))
+            gs = fig.add_gridspec(2, 1, height_ratios=[1, 1], hspace=0.4)
+            
+            # Page header
+            fig.suptitle(f'Position Analysis: {epc}', fontsize=16, fontweight='bold', y=0.95)
+            
+            # X Position Graph (section 1)
+            ax_x = fig.add_subplot(gs[0])
+            x_graph_created = self._generate_x_position_graph(atr_point_store, epc, ax_x)
+            
+            if not x_graph_created:
+                # Fallback message if no X graph could be created
+                ax_x.text(0.5, 0.5, 'No X coordinate data available for this EPC', 
+                          ha='center', va='center', fontsize=11,
+                          bbox=dict(boxstyle="round,pad=0.5", facecolor="lightyellow"))
+                ax_x.set_xlim(0, 1)
+                ax_x.set_ylim(0, 1)
+                ax_x.axis('off')
+            
+            # Y Position Graph (section 2)
+            ax_y = fig.add_subplot(gs[1])
+            y_graph_created = self._generate_y_position_graph(atr_point_store, epc, ax_y)
+            
+            if not y_graph_created:
+                # Fallback message if no Y graph could be created
+                ax_y.text(0.5, 0.5, 'No Y coordinate data available for this EPC', 
+                          ha='center', va='center', fontsize=11,
+                          bbox=dict(boxstyle="round,pad=0.5", facecolor="lightyellow"))
+                ax_y.set_xlim(0, 1)
+                ax_y.set_ylim(0, 1)
+                ax_y.axis('off')
+            
+            # Note: Custom GridSpec layout eliminates need for plt.tight_layout()
+            pdf.savefig(fig, bbox_inches='tight')
+            plt.close(fig)
+            
+        except Exception as e:
+            print(f"❌ Error generating position graphs page for EPC {epc}: {e}")
+            if hasattr(self, 'debug') and self.debug:
+                traceback.print_exc()
+
+    def _generate_x_position_graph(self, point_store, epc: str, ax_x):
+        """
+        Generates X position variation graph for ATR7000 readers with smooth curve.
+        
+        Args:
+            point_store: PointDataStore instance with position data
+            epc: EPC string to get position data for
+            ax_x: matplotlib axes to plot on
+            
+        Returns:
+            bool: True if graph was generated, False if no data
+        """
+        try:
+            # Get XY history for this EPC
+            timestamps, x_coords, y_coords = point_store.get_xy_history(epc, all_points=True)
+            
+            if not timestamps or not x_coords or len(timestamps) == 0:
+                # No position data available
+                ax_x.text(0.5, 0.5, 'No X coordinate data available for this EPC', 
+                          ha='center', va='center', fontsize=11,
+                          bbox=dict(boxstyle="round,pad=0.5", facecolor="lightyellow"))
+                ax_x.set_xlim(0, 1)
+                ax_x.set_ylim(0, 1)
+                ax_x.axis('off')
+                return False
+            
+            # Plot X coordinates
+            ax_x.plot(timestamps, x_coords, 'b-', linewidth=0.5, marker='o', markersize=2, label='X Coordinate', alpha=0.3)
+
+            # Calculate and plot trend line - Design choice --> not significant
+            # trend_info = self._calculate_trend_line(timestamps, x_coords)
+            # if trend_info:
+            #     ax_x.plot(trend_info['trend_timestamps'], trend_info['trend_coords'], 
+            #              'navy', linewidth=2, linestyle='--', label='X Trend', alpha=0.9)
+            
+            # Calculate and plot smooth curve
+            # Savitzky-Golay Filter
+            smooth_info = self._calculate_smooth_curve_savgol(timestamps, x_coords)
+            
+            if smooth_info:
+                ax_x.plot(smooth_info['timestamps'], smooth_info['coordinates'], 
+                         'green', linewidth=2, linestyle='-', label='X Smooth', alpha=1)
+            
+            ax_x.set_ylabel('X Coordinate (meters)', fontsize=10)
+            ax_x.set_title('X Position Variations Over Time', fontsize=11, fontweight='bold')
+            ax_x.grid(True, alpha=0.3)
+            ax_x.legend(fontsize=9)
+            
+            # Format x-axis with adaptive interval based on timestamps time span
+            ax_x.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
+            
+            # Calculate time span to choose appropriate locator (time axis markers)
+            try:
+                time_span_seconds = (max(timestamps) - min(timestamps)).total_seconds()
+                
+                # Choose appropriate time axis interval based on position data duration
+                if time_span_seconds <= 10:  # ≤ 10 seconds: show every second
+                    ax_x.xaxis.set_major_locator(mdates.SecondLocator(interval=1))
+                elif time_span_seconds <= 30:  # ≤ 30 seconds: show every 5 seconds
+                    ax_x.xaxis.set_major_locator(mdates.SecondLocator(interval=5))
+                elif time_span_seconds <= 60:  # ≤ 1 minute: show every 10 seconds
+                    ax_x.xaxis.set_major_locator(mdates.SecondLocator(interval=10))
+                elif time_span_seconds <= 120:  # ≤ 2 minutes: show every 15 seconds
+                    ax_x.xaxis.set_major_locator(mdates.SecondLocator(interval=15))
+                elif time_span_seconds <= 300:  # ≤ 5 minutes: show every 30 seconds
+                    ax_x.xaxis.set_major_locator(mdates.SecondLocator(interval=30))
+                elif time_span_seconds <= 900:  # ≤ 15 minutes: show every minute
+                    ax_x.xaxis.set_major_locator(mdates.MinuteLocator(interval=1))
+                elif time_span_seconds <= 3600:  # ≤ 1 hour: show every 5 minutes
+                    ax_x.xaxis.set_major_locator(mdates.MinuteLocator(interval=5))
+                else:  # > 1 hour: show every 15 minutes
+                    ax_x.xaxis.set_major_locator(mdates.MinuteLocator(interval=15))
+                    
+            except (ValueError, TypeError, AttributeError):
+                # Fallback to data point based approach if timestamp calculation fails
+                if len(timestamps) > 10:
+                    ax_x.xaxis.set_major_locator(mdates.SecondLocator(interval=max(1, len(timestamps)//8)))
+                else:
+                    ax_x.xaxis.set_major_locator(mdates.SecondLocator(interval=1))
+            
+            ax_x.tick_params(axis='x', labelsize=8)
+            ax_x.tick_params(axis='y', labelsize=9)
+            
+            # Don't show x-axis labels (will be shown only on bottom graph)
+            ax_x.set_xticklabels([])
+            
+            # Set time range
+            if len(timestamps) > 1:
+                time_range = [min(timestamps), max(timestamps)]
+                ax_x.set_xlim(time_range)
+            
+            # Add statistics info box
+            if len(x_coords) > 0:
+                x_range = max(x_coords) - min(x_coords)
+                x_mean = sum(x_coords) / len(x_coords)
+                stats_text = f'Points: {len(x_coords)}\nRange: {x_range:.2f}m\nMean: {x_mean:.2f}m'
+                
+                # Add trend information if available - Design choice --> not significant
+                # if trend_info:
+                #     slope_per_second = trend_info['slope']
+                #     direction = trend_info['direction']
+                    
+                #     # Convert slope to more meaningful units (meters per minute if time span > 60s)
+                #     time_span = trend_info['time_span_seconds']
+                #     if time_span > 60:
+                #         slope_per_minute = slope_per_second * 60
+                #         stats_text += f'\nTrend: {direction}\nSlope: {slope_per_minute:.3f}m/min'
+                #     else:
+                #         stats_text += f'\nTrend: {direction}\nSlope: {slope_per_second:.3f}m/s'
+                
+                ax_x.text(0.02, 0.98, stats_text, transform=ax_x.transAxes, fontsize=8,
+                         verticalalignment='top', bbox=dict(boxstyle="round,pad=0.3", facecolor="lightblue", alpha=0.8))
+            
+            return True
+            
+        except Exception as e:
+            if hasattr(self, 'debug') and self.debug:
+                print(f"⚠️  Error generating X position graph: {e}")
+            return False
+
+    def _generate_y_position_graph(self, point_store, epc: str, ax_y):
+        """
+        Generates Y position variation graph for ATR7000 readers with smooth curve.
+        
+        Args:
+            point_store: PointDataStore instance with position data
+            epc: EPC string to get position data for
+            ax_y: matplotlib axes to plot on
+            
+        Returns:
+            bool: True if graph was generated, False if no data
+        """
+        try:
+            # Get XY history for this EPC
+            timestamps, x_coords, y_coords = point_store.get_xy_history(epc, all_points=True)
+            
+            if not timestamps or not y_coords or len(timestamps) == 0:
+                # No position data available
+                ax_y.text(0.5, 0.5, 'No Y coordinate data available for this EPC', 
+                          ha='center', va='center', fontsize=11,
+                          bbox=dict(boxstyle="round,pad=0.5", facecolor="lightyellow"))
+                ax_y.set_xlim(0, 1)
+                ax_y.set_ylim(0, 1)
+                ax_y.axis('off')
+                return False
+            
+            # Plot Y coordinates
+            ax_y.plot(timestamps, y_coords, 'r-', linewidth=0.5, marker='o', markersize=2, label='Y Coordinate', alpha=0.3)
+            
+            # Calculate and plot trend line - Design choice --> not significant
+            # trend_info = self._calculate_trend_line(timestamps, y_coords)
+            # if trend_info:
+            #     ax_y.plot(trend_info['trend_timestamps'], trend_info['trend_coords'], 
+            #              'darkred', linewidth=2, linestyle='--', label='Y Trend', alpha=0.9)
+            
+            # Calculate and plot smooth curve
+            # Savitzky-Golay Filter
+            smooth_info = self._calculate_smooth_curve_savgol(timestamps, y_coords)
+
+            if smooth_info:
+                ax_y.plot(smooth_info['timestamps'], smooth_info['coordinates'], 
+                         'green', linewidth=2, linestyle='-', label='Y Smooth', alpha=1)
+            
+            ax_y.set_ylabel('Y Coordinate (meters)', fontsize=10)
+            ax_y.set_xlabel('Time', fontsize=10)
+            ax_y.set_title('Y Position Variations Over Time', fontsize=11, fontweight='bold')
+            ax_y.grid(True, alpha=0.3)
+            ax_y.legend(fontsize=9)
+            
+            # Format x-axis with adaptive interval based on timestamps time span
+            ax_y.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
+            
+            # Calculate time span to choose appropriate locator (time axis markers)
+            try:
+                time_span_seconds = (max(timestamps) - min(timestamps)).total_seconds()
+                
+                # Choose appropriate time axis interval based on position data duration
+                if time_span_seconds <= 10:  # ≤ 10 seconds: show every second
+                    ax_y.xaxis.set_major_locator(mdates.SecondLocator(interval=1))
+                elif time_span_seconds <= 30:  # ≤ 30 seconds: show every 5 seconds
+                    ax_y.xaxis.set_major_locator(mdates.SecondLocator(interval=5))
+                elif time_span_seconds <= 60:  # ≤ 1 minute: show every 10 seconds
+                    ax_y.xaxis.set_major_locator(mdates.SecondLocator(interval=10))
+                elif time_span_seconds <= 120:  # ≤ 2 minutes: show every 15 seconds
+                    ax_y.xaxis.set_major_locator(mdates.SecondLocator(interval=15))
+                elif time_span_seconds <= 300:  # ≤ 5 minutes: show every 30 seconds
+                    ax_y.xaxis.set_major_locator(mdates.SecondLocator(interval=30))
+                elif time_span_seconds <= 900:  # ≤ 15 minutes: show every minute
+                    ax_y.xaxis.set_major_locator(mdates.MinuteLocator(interval=1))
+                elif time_span_seconds <= 3600:  # ≤ 1 hour: show every 5 minutes
+                    ax_y.xaxis.set_major_locator(mdates.MinuteLocator(interval=5))
+                else:  # > 1 hour: show every 15 minutes
+                    ax_y.xaxis.set_major_locator(mdates.MinuteLocator(interval=15))
+                    
+            except (ValueError, TypeError, AttributeError):
+                # Fallback to data point based approach if timestamp calculation fails
+                if len(timestamps) > 10:
+                    ax_y.xaxis.set_major_locator(mdates.SecondLocator(interval=max(1, len(timestamps)//8)))
+                else:
+                    ax_y.xaxis.set_major_locator(mdates.SecondLocator(interval=1))
+            
+            plt.setp(ax_y.xaxis.get_majorticklabels(), rotation=45, fontsize=8)
+            ax_y.tick_params(axis='y', labelsize=9)
+            
+            # Set time range
+            if len(timestamps) > 1:
+                time_range = [min(timestamps), max(timestamps)]
+                ax_y.set_xlim(time_range)
+            
+            # Add statistics info box
+            if len(y_coords) > 0:
+                y_range = max(y_coords) - min(y_coords)
+                y_mean = sum(y_coords) / len(y_coords)
+                stats_text = f'Points: {len(y_coords)}\nRange: {y_range:.2f}m\nMean: {y_mean:.2f}m'
+                
+                # Add trend information if available - Design choice --> not significant
+                # if trend_info:
+                #     slope_per_second = trend_info['slope']
+                #     direction = trend_info['direction']
+                    
+                #     # Convert slope to more meaningful units (meters per minute if time span > 60s)
+                #     time_span = trend_info['time_span_seconds']
+                #     if time_span > 60:
+                #         slope_per_minute = slope_per_second * 60
+                #         stats_text += f'\nTrend: {direction}\nSlope: {slope_per_minute:.3f}m/min'
+                #     else:
+                #         stats_text += f'\nTrend: {direction}\nSlope: {slope_per_second:.3f}m/s'
+                
+                ax_y.text(0.02, 0.98, stats_text, transform=ax_y.transAxes, fontsize=8,
+                         verticalalignment='top', bbox=dict(boxstyle="round,pad=0.3", facecolor="lightcoral", alpha=0.8))
+            
+            return True
+            
+        except Exception as e:
+            if hasattr(self, 'debug') and self.debug:
+                print(f"⚠️  Error generating Y position graph: {e}")
+            return False
+
+    def _is_messages_csv_from_atr(self, csv_file_path: str) -> bool:
+        """
+        Checks if a messages_read CSV file is from an ATR7000 reader or a standard RFID reader.
+        
+        Args:
+            csv_file_path: Full path to the messages_read CSV file
+            
+        Returns:
+            True if the CSV is from an ATR7000 reader, False if from a standard RFID reader
+        """
+        try:           
+            # Validate file exists
+            if not os.path.exists(csv_file_path):
+                if self.debug:
+                    print(f"⚠️  File not found: {csv_file_path}")
+                return False
+            
+            # Check if it's a messages_read CSV file by filename
+            filename = os.path.basename(csv_file_path)
+            if not filename.startswith('messages_read_') or not filename.endswith('.csv'):
+                if self.debug:
+                    print(f"⚠️  Not a messages_read CSV file: {filename}")
+                return False
+            
+            atr_indicators = 0
+            standard_rfid_indicators = 0
+            rows_analyzed = 0
+            max_rows_to_analyze = 10  # Analyze first 10 data rows for reliable detection
+            
+            with open(csv_file_path, 'r', encoding='utf-8') as f:
+                csv_reader = csv.DictReader(f)
+                
+                # Check if CSV has expected columns
+                if 'Raw_JSON' not in csv_reader.fieldnames:
+                    if self.debug:
+                        print(f"⚠️  CSV missing Raw_JSON column")
+                    return False
+                
+                for row in csv_reader:
+                    if rows_analyzed >= max_rows_to_analyze:
+                        break
+                    
+                    try:
+                        # Parse the JSON message
+                        raw_json = row.get('Raw_JSON', '')
+                        if not raw_json:
+                            continue
+                            
+                        message_data = json.loads(raw_json)
+                        message_type = message_data.get('type', '')
+                        data_section = message_data.get('data', {})
+                        
+                        # Check for ATR7000 indicators
+                        if message_type in ['DIRECTIONALITY_RAW', 'DIRECTIONALITY']:
+                            atr_indicators += 2  # Strong indicator
+                            
+                        # Check for ATR-specific fields in data section
+                        atr_fields = ['azimuth', 'elevation', 'azimuthConf', 'elevationConf', 'zone', 'zoneName']
+                        for field in atr_fields:
+                            if field in data_section:
+                                atr_indicators += 1
+                        
+                        # Check RSSI field type (ATR uses "rssi", standard uses "peakRssi")
+                        if 'rssi' in data_section and 'peakRssi' not in data_section:
+                            atr_indicators += 1
+                        elif 'peakRssi' in data_section and 'rssi' not in data_section:
+                            standard_rfid_indicators += 1
+                        
+                        # Check for standard RFID indicators
+                        if message_type == 'CUSTOM':
+                            standard_rfid_indicators += 1
+                            
+                        # Check for standard RFID-specific fields
+                        standard_fields = ['CRC', 'PC', 'channel', 'eventNum', 'phase', 'reads']
+                        for field in standard_fields:
+                            if field in data_section:
+                                standard_rfid_indicators += 1
+                        
+                        rows_analyzed += 1
+                        
+                    except (json.JSONDecodeError, KeyError) as e:
+                        if self.debug:
+                            print(f"⚠️  Error parsing JSON in row {rows_analyzed + 1}: {e}")
+                        continue
+            
+            if self.debug:
+                print(f"🔍 Analysis results for {filename}:")
+                print(f"   Rows analyzed: {rows_analyzed}")
+                print(f"   ATR indicators: {atr_indicators}")
+                print(f"   Standard RFID indicators: {standard_rfid_indicators}")
+            
+            # Decision logic: ATR if more ATR indicators than standard RFID indicators
+            is_atr = atr_indicators > standard_rfid_indicators
+            
+            if self.debug:
+                reader_type = "ATR7000" if is_atr else "Standard RFID"
+                print(f"✅ Detected: {reader_type} reader")
+            
+            return is_atr
+            
+        except Exception as e:
+            if self.debug:
+                print(f"❌ Error analyzing CSV file: {e}")
+            return False
+
+    def process_atr7000_message(
+            self,
+            message: str,
+            position_point_record: PointDataStore = None,
+            position_calculator: ATR7000PositionCalculator = ATR7000PositionCalculator()) -> PointDataStore:
+        try:
+            if isinstance(message, dict):
+                data = message
+            else:
+                data = json.loads(message)
+
+            # Extract timestamp from the JSON message
+            message_timestamp = None
+            timestamp_str = data.get('timestamp', '')
+            if timestamp_str:
+                try:
+                    # Parse ISO 8601 timestamp format: "2025-09-11T10:17:02.227+0000"
+                    # Remove timezone info and parse
+                    timestamp_clean = timestamp_str.replace('+0000', '').replace('Z', '')
+                    message_timestamp = datetime.strptime(timestamp_clean, '%Y-%m-%dT%H:%M:%S.%f')
+                except ValueError:
+                    try:
+                        # Try without microseconds
+                        timestamp_clean = timestamp_str.replace('+0000', '').replace('Z', '')
+                        message_timestamp = datetime.strptime(timestamp_clean, '%Y-%m-%dT%H:%M:%S')
+                    except ValueError:
+                        if hasattr(self, 'debug') and self.debug:
+                            print(f"[DEBUG]⚠️  Could not parse message timestamp: {timestamp_str}")
+                        # Will use datetime.now() as fallback
+
+            # Search for RAW_DIRECTIONALITY or DIRECTIONALITY_RAW messages
+            if data.get('type') in ['RAW_DIRECTIONALITY', 'DIRECTIONALITY_RAW']:
+                # Extract message data
+                msg_data = data.get('data', {})
+                
+                epc = msg_data.get('idHex') or msg_data.get('epc', '') or msg_data.get('EPC', '')
+                azimuth = msg_data.get('azimuth') or msg_data.get('Azimuth')
+                elevation = msg_data.get('elevation') or msg_data.get('Elevation')
+                rssi = msg_data.get('rssi') or msg_data.get('peakRssi') or msg_data.get('RSSI')
+                antenna = msg_data.get('antenna') or msg_data.get('Antenna')
+
+                if azimuth is None:
+                    azimuth = 0.0
+                    if self.debug:
+                        print(f"[DEBUG] Azimuth None set to: 0.0")
+                if elevation is None:
+                    elevation = 0.0
+                    if self.debug:
+                        print(f"[DEBUG] Elevation None set to: 0.0")
+
+                if epc and azimuth is not None and elevation is not None:
+                    # Use extracted timestamp from JSON message or current time as fallback
+                    timestamp_to_use = message_timestamp or datetime.now()
+                    
+                    # Create RAW_DIRECTIONALITY message
+                    raw_message = RawDirectionalityMessage(
+                        epc=epc,
+                        azimuth=float(azimuth),
+                        elevation=float(elevation),
+                        timestamp=timestamp_to_use,
+                        rssi=rssi,
+                        antenna=antenna
+                    )
+                    
+                    # Calculate position
+                    # The position is calculated based on
+                    position = position_calculator.calculate_position(raw_message)
+
+                    # Add to point store
+                    position_point_record.add_position_point(position)
+                else:
+                    print(f"⚠️  Incomplete RAW_DIRECTIONALITY message: {msg_data}")
+
+            # Also handle CUSTOM messages that may contain ATR7000 localization data
+            elif data.get('type') == 'CUSTOM':
+                msg_data = data.get('data', {})
+                epc = msg_data.get('idHex', '')
+                
+                # Look for azimuth/elevation data in CUSTOM messages
+                azimuth = msg_data.get('azimuth')
+                elevation = msg_data.get('elevation')
+                location_x = msg_data.get('x')
+                location_y = msg_data.get('y')
+                
+                # Check if it has localization data
+                if azimuth is not None and elevation is not None:
+                    # Use extracted timestamp from JSON message or current time as fallback
+                    timestamp_to_use = message_timestamp or datetime.now()
+                    
+                    rssi = msg_data.get('peakRssi') or msg_data.get('rssi')
+                    antenna = msg_data.get('antenna')
+                    
+                    # Create RAW_DIRECTIONALITY message
+                    raw_message = RawDirectionalityMessage(
+                        epc=epc,
+                        azimuth=float(azimuth),
+                        elevation=float(elevation),
+                        timestamp=timestamp_to_use,
+                        rssi=rssi,
+                        antenna=antenna
+                    )
+                    
+                    # Calculate position
+                    position = position_calculator.calculate_position(raw_message)
+                    
+                    # Add to point store
+                    position_point_record.add_position_point(position)
+
+                elif location_x is not None and location_y is not None:
+                    # Use extracted timestamp from JSON message or current time as fallback
+                    timestamp_to_use = message_timestamp or datetime.now()
+                    
+                    # Use coordinates directly if available
+                    position = PositionPoint(
+                        epc=epc,
+                        x=float(location_x),
+                        y=float(location_y),
+                        z=0.0,
+                        timestamp=timestamp_to_use,
+                        is_significant=True
+                    )
+
+                    position_point_record.add_position_point(position)
+        
+        except json.JSONDecodeError:
+            # Non-JSON message, silently ignore unless useful
+            print(f"⚠️  Non-JSON message received: {data}")
+        except Exception as e:
+            print(f"⚠️  Error processing ATR7000 message: {e}")
+
+        return position_point_record
+
+    def process_atr7000_messages_csv(self, messages_csv_file_path: str) -> PointDataStore:
+        """
+        Processes all messages in an ATR7000 CSV file and populates a PointDataStore.
+        
+        Args:
+            messages_csv_file_path: Full path to the messages_read CSV file from ATR7000 reader
+            
+        Returns:
+            PointDataStore populated with position points calculated from all messages
+        """
+        try:
+            # Create PointDataStore with specified parameters
+            point_store = PointDataStore(
+                max_series_count=1000,
+                max_points_per_series=10000,
+                max_all_points_per_series=10000000
+            )
+            
+            # Create position calculator
+            # With no parameters given the defaults are --> tag height = 3.0m, reader height = 15.0m
+            position_calculator = ATR7000PositionCalculator()
+            
+            # Validate file exists
+            if not os.path.exists(messages_csv_file_path):
+                print(f"❌ Messages file not found: {messages_csv_file_path}")
+                return point_store
+            
+            # Validate it's a messages CSV file
+            filename = os.path.basename(messages_csv_file_path)
+            if not filename.startswith('messages_read_') or not filename.endswith('.csv'):
+                print(f"❌ Invalid file format. Expected messages_read_*.csv, got: {filename}")
+                return point_store
+            
+            if self.debug:
+                print(f"[DEBUG]📍 Processing ATR7000 messages from: {filename}")
+                print(f"[DEBUG]🔧 PointDataStore limits: {point_store.max_series_count} series, {point_store.max_points_per_series} points/series")
+            
+            messages_processed = 0
+            messages_with_position_data = 0
+            errors_encountered = 0
+            
+            with open(messages_csv_file_path, 'r', encoding='utf-8') as f:
+                csv_reader = csv.DictReader(f)
+                
+                # Validate CSV has expected columns
+                if 'Raw_JSON' not in csv_reader.fieldnames:
+                    print(f"❌ Invalid CSV format. Missing 'Raw_JSON' column")
+                    return point_store
+                
+                if self.debug:
+                    print("[DEBUG]🔄 Processing messages...")
+
+                for row_num, row in enumerate(csv_reader, start=2):  # Start at 2 because row 1 is header
+                    try:
+                        raw_json = row.get('Raw_JSON', '')
+                        if not raw_json:
+                            continue
+                        
+                        # Store initial point count to check if new points were added
+                        initial_point_count = sum(len(points_deque) for points_deque in point_store.all_points_dict.values())
+                        
+                        # Process the message (timestamp will be extracted from JSON message itself)
+                        point_store = self.process_atr7000_message(
+                            message=raw_json,
+                            position_point_record=point_store,
+                            position_calculator=position_calculator
+                        )
+                        
+                        messages_processed += 1
+                        
+                        # Check if new points were added
+                        final_point_count = sum(len(points_deque) for points_deque in point_store.all_points_dict.values())
+                        if final_point_count > initial_point_count:
+                            messages_with_position_data += 1
+                        
+                        # Progress feedback every 50 messages
+                        if messages_processed % 50 == 0 and self.debug:
+                            print(f"[DEBUG]   📊 Processed {messages_processed} messages, {messages_with_position_data} with position data")
+                        
+                    except Exception as e:
+                        errors_encountered += 1
+                        if self.debug:
+                            print(f"[DEBUG]⚠️  Error processing message at row {row_num}: {e}")
+                        
+                        # Don't stop processing for individual message errors
+                        continue
+            
+            # Final summary
+            total_position_points = sum(len(points_deque) for points_deque in point_store.all_points_dict.values())
+            unique_tags = len(point_store.series_dict)
+            
+            if self.debug:
+                print(f"[DEBUG]✅ ATR7000 message processing completed!")
+                print(f"[DEBUG]📊 Summary:")
+                print(f"[DEBUG]   • Total messages processed: {messages_processed}")
+                print(f"[DEBUG]   • Messages with position data: {messages_with_position_data}")
+                print(f"[DEBUG]   • Total position points calculated: {total_position_points}")
+                print(f"[DEBUG]   • Unique tags tracked: {unique_tags}")
+                if errors_encountered > 0:
+                    print(f"[DEBUG]   • Errors encountered: {errors_encountered}")
+
+                if unique_tags > 0:
+                    print(f"[DEBUG]📍 Tag series in PointDataStore:")
+                    for epc, series in point_store.series_dict.items():
+                        point_count = len(point_store.all_points_dict.get(epc, []))
+                        print(f"[DEBUG]   • {epc[:16]}...: {point_count} points")
+            
+            return point_store
+            
+        except Exception as e:
+            print(f"❌ Error processing ATR7000 messages CSV: {e}")
+            if self.debug:                
+                traceback.print_exc()
+            
+            # Return empty PointDataStore on error
+            return PointDataStore(
+                max_series_count=1000,
+                max_points_per_series=10000,
+                max_all_points_per_series=10000000
+            )
+
+    # Not used but kept for eventual future use
+    def _calculate_trend_line(self, timestamps, coordinates):
+        """
+        Calculate linear trend line for position coordinate data.
+        
+        Args:
+            timestamps: List of datetime objects
+            coordinates: List of coordinate values (x or y)
+            
+        Returns:
+            dict: Contains slope, intercept, direction, and trend points, or None if calculation fails
+        """
+        try:            
+            if len(timestamps) < 2 or len(coordinates) < 2:
+                return None
+                
+            # Convert timestamps to numeric seconds since first timestamp
+            first_time = timestamps[0]
+            time_numeric = [(t - first_time).total_seconds() for t in timestamps]
+            
+            # Calculate linear regression (degree=1 for linear trend)
+            coefficients = np.polyfit(time_numeric, coordinates, 1)
+            slope, intercept = coefficients
+            
+            # Calculate trend line endpoints for the time range
+            time_range = [min(time_numeric), max(time_numeric)]
+            trend_coords = [slope * t + intercept for t in time_range]
+            trend_timestamps = [timestamps[0], timestamps[-1]]
+            
+            # Determine trend direction
+            slope_threshold = 0.001  # Threshold for considering trend "stable"
+            if abs(slope) < slope_threshold:
+                direction = "Stable"
+            elif slope > 0:
+                direction = "Increasing"
+            else:
+                direction = "Decreasing"
+            
+            return {
+                'slope': slope,
+                'intercept': intercept,
+                'direction': direction,
+                'trend_timestamps': trend_timestamps,
+                'trend_coords': trend_coords,
+                'time_span_seconds': max(time_numeric)
+            }
+            
+        except Exception as e:
+            if hasattr(self, 'debug') and self.debug:
+                print(f"⚠️  Error calculating trend line: {e}")
+            return None
+
+    # SMOOTHING ALGORITHM
+    # We use Savitzky-Golay Filter (savgol), but kept for eventual future use
+    def _calculate_smooth_curve_spline(self, timestamps, coordinates):
+        """
+        Calculate smooth interpolated curve for position coordinate data using cubic splines.
+        
+        Args:
+            timestamps: List of datetime objects
+            coordinates: List of coordinate values (x or y)
+            
+        Returns:
+            dict: Contains smooth curve timestamps and coordinates, or None if calculation fails
+        """
+        try:
+            # Import scipy.interpolate for cubic spline
+            try:
+                from scipy.interpolate import make_interp_spline
+            except ImportError:
+                if hasattr(self, 'debug') and self.debug:
+                    print("⚠️  scipy.interpolate not available for cubic spline smoothing")
+                return None
+                    
+            if len(timestamps) < 4 or len(coordinates) < 4:
+                # Need at least 4 points for cubic spline
+                return None
+                
+            # Convert timestamps to numeric seconds since first timestamp
+            first_time = timestamps[0]
+            time_numeric = np.array([(t - first_time).total_seconds() for t in timestamps])
+            coordinates_array = np.array(coordinates)
+            
+            # Create cubic spline interpolator
+            spline = make_interp_spline(time_numeric, coordinates_array, k=3)
+            
+            # Generate more time points for smooth curve visualization (3x density)
+            time_span = max(time_numeric) - min(time_numeric)
+            num_points = max(100, len(timestamps) * 3)  # At least 100 points for smoothness
+            time_smooth = np.linspace(min(time_numeric), max(time_numeric), num_points)
+            
+            # Evaluate spline at smooth time points
+            coords_smooth = spline(time_smooth)
+            
+            # Convert back to datetime objects
+            timestamps_smooth = [first_time + np.timedelta64(int(t * 1000), 'ms') for t in time_smooth]
+            
+            return {
+                'timestamps': timestamps_smooth,
+                'coordinates': coords_smooth.tolist()
+            }
+            
+        except Exception as e:
+            if hasattr(self, 'debug') and self.debug:
+                print(f"⚠️  Error calculating smooth curve: {e}")
+            return None
+
+    def _calculate_smooth_curve_savgol(self, timestamps, coordinates):
+        """
+        Calculate smooth curve for position coordinate data using Savitzky-Golay filter.
+        
+        Args:
+            timestamps: List of datetime objects
+            coordinates: List of coordinate values (x or y)
+            
+        Returns:
+            dict: Contains smooth curve timestamps and coordinates, or None if calculation fails
+        """
+        try:
+            # Import scipy.signal for Savitzky-Golay filter
+            try:
+                from scipy.signal import savgol_filter
+            except ImportError:
+                if hasattr(self, 'debug') and self.debug:
+                    print("⚠️  scipy.signal not available for Savitzky-Golay smoothing")
+                return None
+                
+            if len(timestamps) < 5 or len(coordinates) < 5:
+                # Need at least 5 points for reasonable Savitzky-Golay filtering
+                return None
+                
+            coordinates_array = np.array(coordinates)
+            
+            # Choose appropriate window length and polynomial order for position data
+            data_length = len(coordinates)
+            
+            # Window length should be odd and much smaller than data length
+            # For position data, we want to preserve features while smoothing noise
+            if data_length >= 15:
+                window_length = 7  # Good balance for most position tracking data
+                polyorder = 3      # Cubic polynomial preserves curvature well
+            elif data_length >= 9:
+                window_length = 5  # Smaller window for limited data
+                polyorder = 2      # Quadratic for simpler curves
+            else:
+                window_length = data_length if data_length % 2 == 1 else data_length - 1
+                polyorder = min(2, window_length - 1)
+            
+            # Ensure window_length is odd and >= polyorder + 1
+            if window_length % 2 == 0:
+                window_length += 1
+            if window_length > data_length:
+                window_length = data_length if data_length % 2 == 1 else data_length - 1
+            if polyorder >= window_length:
+                polyorder = window_length - 1
+                
+            # Apply Savitzky-Golay filter for smoothing
+            # Use 'nearest' mode for boundary handling to avoid edge artifacts
+            coords_smooth = savgol_filter(coordinates_array, 
+                                        window_length=window_length, 
+                                        polyorder=polyorder,
+                                        mode='nearest')
+            
+            return {
+                'timestamps': timestamps.copy(),  # Same timestamps as input
+                'coordinates': coords_smooth.tolist()
+            }
+            
+        except Exception as e:
+            if hasattr(self, 'debug') and self.debug:
+                print(f"⚠️  Error calculating Savitzky-Golay smooth curve: {e}")
+            return None
+
+    def _calculate_smooth_curve_gaussian(self, timestamps, coordinates):
+        """
+        Calculate smooth curve for position coordinate data using Gaussian filter.
+        
+        Args:
+            timestamps: List of datetime objects
+            coordinates: List of coordinate values (x or y)
+            
+        Returns:
+            dict: Contains smooth curve timestamps and coordinates, or None if calculation fails
+        """
+        try:
+            # Import scipy.ndimage for Gaussian filtering
+            try:
+                from scipy.ndimage import gaussian_filter1d
+            except ImportError:
+                if hasattr(self, 'debug') and self.debug:
+                    print("⚠️  scipy.ndimage not available for Gaussian smoothing")
+                return None
+                
+            if len(timestamps) < 3 or len(coordinates) < 3:
+                # Need at least 3 points for Gaussian filtering
+                return None
+                
+            coordinates_array = np.array(coordinates)
+            
+            # Choose appropriate sigma based on data length
+            # Sigma controls the amount of smoothing - larger values = more smoothing
+            data_length = len(coordinates)
+            
+            if data_length >= 20:
+                sigma = 2.0  # Moderate smoothing for larger datasets
+            elif data_length >= 10:
+                sigma = 1.5  # Lighter smoothing for medium datasets
+            else:
+                sigma = 1.0  # Minimal smoothing for small datasets
+            
+            # Apply Gaussian filter for smoothing
+            # Use 'reflect' mode for boundary handling to avoid edge artifacts
+            coords_smooth = gaussian_filter1d(coordinates_array, 
+                                            sigma=sigma,
+                                            mode='reflect')
+            
+            return {
+                'timestamps': timestamps.copy(),  # Same timestamps as input
+                'coordinates': coords_smooth.tolist()
+            }
+            
+        except Exception as e:
+            if hasattr(self, 'debug') and self.debug:
+                print(f"⚠️  Error calculating Gaussian smooth curve: {e}")
+            return None
+
+    def _calculate_smooth_curve_ema(self, timestamps, coordinates):
+        """
+        Calculate smooth curve for position coordinate data using Exponential Moving Average.
+        
+        Args:
+            timestamps: List of datetime objects
+            coordinates: List of coordinate values (x or y)
+            
+        Returns:
+            dict: Contains smooth curve timestamps and coordinates, or None if calculation fails
+        """
+        try:
+            if len(timestamps) < 2 or len(coordinates) < 2:
+                # Need at least 2 points for EMA
+                return None
+                
+            coordinates_array = np.array(coordinates)
+            
+            # Choose appropriate alpha (smoothing factor) based on data length
+            # Alpha determines responsiveness: higher alpha = less smoothing, lower alpha = more smoothing
+            data_length = len(coordinates)
+            
+            if data_length >= 20:
+                alpha = 0.3  # More smoothing for larger datasets
+            elif data_length >= 10:
+                alpha = 0.4  # Moderate smoothing for medium datasets
+            else:
+                alpha = 0.5  # Less smoothing for small datasets to preserve detail
+            
+            # Calculate Exponential Moving Average
+            coords_smooth = np.zeros_like(coordinates_array)
+            coords_smooth[0] = coordinates_array[0]  # First value unchanged
+            
+            for i in range(1, len(coordinates_array)):
+                coords_smooth[i] = alpha * coordinates_array[i] + (1 - alpha) * coords_smooth[i - 1]
+            
+            return {
+                'timestamps': timestamps.copy(),  # Same timestamps as input
+                'coordinates': coords_smooth.tolist()
+            }
+            
+        except Exception as e:
+            if hasattr(self, 'debug') and self.debug:
+                print(f"⚠️  Error calculating EMA smooth curve: {e}")
+            return None
+
+    def _calculate_smooth_curve_polynomial(self, timestamps, coordinates):
+        """
+        Calculate smooth curve for position coordinate data using Polynomial Regression.
+        
+        Args:
+            timestamps: List of datetime objects
+            coordinates: List of coordinate values (x or y)
+            
+        Returns:
+            dict: Contains smooth curve timestamps and coordinates, or None if calculation fails
+        """
+        try:
+            if len(timestamps) < 3 or len(coordinates) < 3:
+                # Need at least 3 points for polynomial fitting
+                return None
+                
+            # Convert timestamps to numeric seconds since first timestamp
+            first_time = timestamps[0]
+            time_numeric = np.array([(t - first_time).total_seconds() for t in timestamps])
+            coordinates_array = np.array(coordinates)
+            
+            # Choose appropriate polynomial degree based on data length
+            data_length = len(coordinates)
+            
+            if data_length >= 20:
+                degree = min(5, data_length - 1)  # Higher order for complex curves, but not too high
+            elif data_length >= 10:
+                degree = min(3, data_length - 1)  # Cubic for moderate complexity
+            elif data_length >= 6:
+                degree = min(2, data_length - 1)  # Quadratic for simple curves
+            else:
+                degree = 1  # Linear for very small datasets
+            
+            # Fit polynomial to the data
+            try:
+                coefficients = np.polyfit(time_numeric, coordinates_array, degree)
+            except np.RankWarning:
+                # Fallback to lower degree if rank warning occurs
+                degree = max(1, degree - 1)
+                coefficients = np.polyfit(time_numeric, coordinates_array, degree)
+            
+            # Generate more time points for smooth curve visualization (2x density)
+            time_span = max(time_numeric) - min(time_numeric)
+            num_points = max(50, len(timestamps) * 2)  # At least 50 points for smoothness
+            time_smooth = np.linspace(min(time_numeric), max(time_numeric), num_points)
+            
+            # Evaluate polynomial at smooth time points
+            coords_smooth = np.polyval(coefficients, time_smooth)
+            
+            # Convert back to datetime objects
+            timestamps_smooth = [first_time + np.timedelta64(int(t * 1000), 'ms') for t in time_smooth]
+            
+            return {
+                'timestamps': timestamps_smooth,
+                'coordinates': coords_smooth.tolist()
+            }
+            
+        except Exception as e:
+            if hasattr(self, 'debug') and self.debug:
+                print(f"⚠️  Error calculating polynomial smooth curve: {e}")
+            return None
+
     # WEBSOCKET #
     
     def handle_iotc_setup_ws(self):
@@ -1554,22 +3021,35 @@ class InteractiveCLI:
             else:
                 print("❌ Failed to disconnect from IOTC")
                 print("💡 Check reader configuration and try again")
-
-            # Extended stabilization time for IOTC service
-            # This might not be needed if reader is fast enough to disconnect from IOTC but added for safety
-            stabilization_time = 10  # This value may need adjustment based on testing
-            print(f"⏳ Waiting {stabilization_time} seconds to allow the IOTC service to stabilize")
-            # Countdown with updates every 10 seconds
-            for remaining in range(stabilization_time, 0, -10):
-                if remaining <= stabilization_time:
-                    time.sleep(10)
-                    if remaining > 10:
-                        print(f"⏳ {remaining-10} seconds remaining... (IOTC is stabilizing)")
-                else:
-                    time.sleep(1)
-
-            # Re-check connection status before attempting reconnection
-            current_connection_status = client.is_iotc_connected(session_id)
+            
+            # Verify IOTC disconnection with reader-specific timing
+            max_attempts = 6 if self.app_context.is_atr7000 else 5
+            check_interval = 30 if self.app_context.is_atr7000 else 10
+            reader_type = "ATR7000" if self.app_context.is_atr7000 else "non-ATR7000"
+            
+            print(f"🔍 Verifying {reader_type} disconnection from IOTC...")
+            print(f"⏳ Will check up to {max_attempts} times with {check_interval}s intervals")
+            
+            current_connection_status = None
+            for attempt in range(1, max_attempts + 1):
+                current_connection_status = client.is_iotc_connected(session_id)
+                
+                if not current_connection_status:
+                    print(f"✅ {reader_type} successfully disconnected from IOTC (attempt {attempt}/{max_attempts})")
+                    break
+                
+                print(f"ℹ️  Attempt {attempt}/{max_attempts}: {reader_type} still connected to IOTC")
+                
+                if attempt < max_attempts:  # Don't sleep after the last attempt
+                    print(f"⏳ Waiting {check_interval} seconds before next check...")
+                    time.sleep(check_interval)
+            
+            # Final status assessment
+            if current_connection_status:
+                print(f"⚠️  {reader_type} still connected to IOTC after {max_attempts} attempts. Proceeding anyway.")
+                print("💡 IOTC service may need additional time to complete disconnection")
+            else:
+                print(f"🎯 Disconnection verification completed successfully for {reader_type}")
 
             if current_connection_status:
                 steps_skipped.append("5. IOTC Service Activation")
@@ -1604,8 +3084,14 @@ class InteractiveCLI:
                         return self._show_setup_results(steps_completed, steps_skipped, steps_failed)
 
             # Extended stabilization time for IOTC service to reconnect from previous step
-            stabilization_time = 30  # This value may need adjustment based on testing (usually longer than the disconnection time of step 4)
-            print(f"⏳ Waiting {stabilization_time} seconds to allow the IOTC service to finish initializing…")
+            # This might not be needed if reader is fast enough to connect to IOTC but added for safety
+            if self.app_context.is_atr7000:
+                # ATR7000 takes a long time to complete a connection after the command is given
+                print("ℹ️  Detected ATR7000 reader, waiting additional time after IOTC connection.")
+                stabilization_time = 60  # This value may need adjustment based on testing
+            else:
+                stabilization_time = 30  # This value may need adjustment based on testing
+            print(f"⏳ Waiting {stabilization_time} seconds to allow the IOTC service to finish initializing after connection...")
             print(f"💡 The IOTC service may take time to become fully operational")
             # Countdown with updates every 10 seconds
             for remaining in range(stabilization_time, 0, -10):
@@ -1622,17 +3108,41 @@ class InteractiveCLI:
             
             print(f"🔗 IOTC initialization period completed. Testing WebSocket connection...")
             
-            # IMPORTANT: Verify reader is still responsive after IOTC setup
+            # IMPORTANT: Verify reader is still responsive after IOTC setup with retry logic
             print(f"🔍 Verifying reader responsiveness after IOTC activation...")
-            try:
-                reader_status = self.app_context.get_status()
-                if reader_status:
-                    print(f"✅ Reader is responsive and operational")
-                else:
-                    print(f"⚠️  Reader may be busy reconnecting finalizing IOTC setup - waiting additional time...")
-                    time.sleep(15)  # Additional wait if reader seems busy
-            except Exception as e:
-                print(f"⚠️  Reader status check failed: {e} - proceeding with caution...")
+            reader_status = None
+            max_retries = 5
+            retry_delay = 60  # seconds
+            
+            for attempt in range(1, max_retries + 1):
+                try:
+                    print(f"📡 Attempt {attempt}/{max_retries}: Checking reader status...")
+                    reader_status = self.app_context.get_status()
+                    
+                    if reader_status:
+                        print(f"✅ Reader is responsive and operational (attempt {attempt})")
+                        break  # Success - exit retry loop
+                    else:
+                        print(f"⚠️  Attempt {attempt}/{max_retries}: Reader returned empty status")
+                        if attempt < max_retries:
+                            print(f"⏳ Waiting {retry_delay} seconds before retry {attempt + 1}...")
+                            time.sleep(retry_delay)
+                        else:
+                            print(f"⚠️  All {max_retries} attempts returned empty status - proceeding anyway")
+                            
+                except Exception as e:
+                    print(f"❌ Attempt {attempt}/{max_retries}: Reader status check failed - {e}")
+                    if attempt < max_retries:
+                        print(f"⏳ Waiting {retry_delay} seconds before retry {attempt + 1}...")
+                        time.sleep(retry_delay)
+                    else:
+                        print(f"⚠️  All {max_retries} attempts failed - proceeding with caution...")
+            
+            # Final status summary
+            if reader_status:
+                print(f"🎯 Reader status verification completed successfully")
+            else:
+                print(f"⚠️  Reader status verification completed with issues - IOTC setup may need more time to stabilize")
             
             websocket_connected = False
             
@@ -1898,22 +3408,35 @@ class InteractiveCLI:
             else:
                 print("❌ Failed to disconnect from IOTC")
                 print("💡 Check reader configuration and try again")
+  
+            # Verify IOTC disconnection with reader-specific timing
+            max_attempts = 6 if self.app_context.is_atr7000 else 5
+            check_interval = 30 if self.app_context.is_atr7000 else 10
+            reader_type = "ATR7000" if self.app_context.is_atr7000 else "non-ATR7000"
+            
+            print(f"🔍 Verifying {reader_type} disconnection from IOTC...")
+            print(f"⏳ Will check up to {max_attempts} times with {check_interval}s intervals")
+            
+            current_connection_status = None
+            for attempt in range(1, max_attempts + 1):
+                current_connection_status = client.is_iotc_connected(session_id)
+                
+                if not current_connection_status:
+                    print(f"✅ {reader_type} successfully disconnected from IOTC (attempt {attempt}/{max_attempts})")
+                    break
+                
+                print(f"ℹ️  Attempt {attempt}/{max_attempts}: {reader_type} still connected to IOTC")
+                
+                if attempt < max_attempts:  # Don't sleep after the last attempt
+                    print(f"⏳ Waiting {check_interval} seconds before next check...")
+                    time.sleep(check_interval)
 
-            # Extended stabilization time for IOTC service
-            # This might not be needed if reader is fast enough to disconnect from IOTC but added for safety
-            stabilization_time = 10  # This value may need adjustment based on testing
-            print(f"⏳ Waiting {stabilization_time} seconds to allow the IOTC service to stabilize")
-            # Countdown with updates every 10 seconds
-            for remaining in range(stabilization_time, 0, -10):
-                if remaining <= stabilization_time:
-                    time.sleep(10)
-                    if remaining > 10:
-                        print(f"⏳ {remaining-10} seconds remaining... (IOTC is stabilizing)")
-                else:
-                    time.sleep(1)
-
-            # Re-check connection status before attempting reconnection
-            current_connection_status = client.is_iotc_connected(session_id)
+            # Final status assessment
+            if current_connection_status:
+                print(f"⚠️  {reader_type} still connected to IOTC after {max_attempts} attempts. Proceeding anyway.")
+                print("💡 IOTC service may need additional time to complete disconnection")
+            else:
+                print(f"🎯 Disconnection verification completed successfully for {reader_type}")
 
             if current_connection_status:
                 print("✅ IOTC already connected")
@@ -1957,8 +3480,13 @@ class InteractiveCLI:
                         return self._show_setup_results(steps_completed, steps_skipped, steps_failed)
             
             # Extended stabilization time for IOTC service to reconnect from previous step
-            stabilization_time = 30  # This value may need adjustment based on testing (usually longer than the disconnection time of step 4)
-            print(f"⏳ Waiting {stabilization_time} seconds to allow the IOTC service to finish initializing…")
+            # This might not be needed if reader is fast enough to connect to IOTC but added for safety
+            if self.app_context.is_atr7000:
+                print("ℹ️  Detected ATR7000 reader, waiting additional time.")
+                stabilization_time = 60  # This value may need adjustment based on testing
+            else:
+                stabilization_time = 30  # This value may need adjustment based on testing
+            print(f"⏳ Waiting {stabilization_time} seconds to allow the IOTC service to finish initializing after connection...")
             print(f"💡 The IOTC service may take time to become fully operational")
             # Countdown with updates every 10 seconds
             for remaining in range(stabilization_time, 0, -10):
@@ -1975,7 +3503,7 @@ class InteractiveCLI:
             print(f"✅ MQTT endpoint '{endpoint_name}' is configured and active")
             print(f"📡 Broker: {host_name}")
             print(f"🏷️  Reader: {reader_name}")
-            print(f"🔗 Client ID: {reader_name}_client")
+            print(f"🔗 Client ID: {reader_name}")
             print("💡 MQTT messages will be published to the configured broker")
             print("💡 Use 'di' command to disconnect from IOTC if needed")
 
@@ -2319,7 +3847,7 @@ class InteractiveCLI:
             print(f"❌ Failed to parse response: {e}")
             return
 
-        # STEP 2: SET ENDPOINT CONFIG (only if changes were made
+        # STEP 2: SET ENDPOINT CONFIG (only if changes were made)
         print("\n🔧 STEP 2: Applying configuration changes...")   
         set_config_url = f"{base_url}/cloud"
         set_config_payload = {

@@ -124,7 +124,8 @@ class AtrSubmenu:
             print(f"🔍 [DEBUG] WebSocket Status: {ws_status}")
         
         # Clear any buffered data from WebSocket to ensure only fresh data
-        self.cli.app_context.clear_websocket_buffer()
+        wb_running = self.cli.app_context.is_websocket_running()
+        self.cli.app_context.clear_websocket_buffer(wb_running)
         
         print(f"📡 Using permanent WebSocket connection")
         
@@ -325,7 +326,8 @@ class AtrSubmenu:
             print(f"🔍 [DEBUG] WebSocket Status: {ws_status}")
 
         # Clear any buffered data from WebSocket to ensure only fresh data
-        self.cli.app_context.clear_websocket_buffer()
+        wb_running = self.cli.app_context.is_websocket_running()
+        self.cli.app_context.clear_websocket_buffer(wb_running)
         
         # Ensure no active listeners before starting
         self.cli.ensure_no_background_listeners()

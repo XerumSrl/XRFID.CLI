@@ -358,13 +358,14 @@ class ZebraIoTCClient:
         """
         Check if the reader is connected to IoT Connector using isConnectedToCloud command.
         """
-        print("🔍 Checking IoT Connector connection status...")
+        if self.debug:
+            print("[DEBUG] Checking IoT Connector connection status...")
         
         if not session_id:
             print("❌ No valid session ID provided")
             return False
             
-        # Build the isConnectedToCloud command exactly like JavaScript
+        # Build the isConnectedToCloud command
         is_connected_command = (
             f"{self.cmd_header}"
             f"<rm:id>104</rm:id>"
@@ -377,7 +378,8 @@ class ZebraIoTCClient:
         )
         
         try:
-            print("📡 Sending isConnectedToCloud command...")
+            if self.debug:
+                print("[DEBUG] Sending isConnectedToCloud command...")
             response = requests.post(
                 self.control_url,
                 data=is_connected_command,
@@ -387,36 +389,38 @@ class ZebraIoTCClient:
             )
             
             if response.status_code == 200:
-                print("📋 Parsing connection response...")
                 root = ET.fromstring(response.text)
                 
-                # Check result code first (like JavaScript)
+                # Check result code first
                 result_code_elements = root.findall('.//g1:resultCode', 
                     namespaces={'g1': 'urn:epcglobal:rm:xsd:1'})
                 
                 if result_code_elements and result_code_elements[0].text == "0":
-                    print("✅ Command executed successfully")
-                    
-                    # Look for g3:isConnected element (like JavaScript)
+                    if self.debug:
+                        print("[DEBUG] Command executed successfully")
+
+                    # Look for g3:isConnected element
                     # Need to find the correct namespace for g3
                     for elem in root.iter():
                         if 'isConnected' in elem.tag:
                             status = elem.text.strip() if elem.text else ""
-                            print(f"🔗 Connection status found: '{status}'")
-                            
+                            if status != "":
+                                print(f"🔗 Connection status found: '{status}'")
+
                             if status.lower() == 'true':
                                 print("✅ Reader is connected to IoT Connector")
                                 return True
                             elif status.lower() == 'false':
                                 print("❌ Reader is not connected to IoT Connector")
                                 return False
-                    
-                    print("⚠️ No isConnected element found in successful response")
-                    print(f"📝 Raw response: {response.text}")
+                    if self.debug:
+                        print("[DEBUG] ⚠️ No isConnected element found in successful response")
+                        print(f"[DEBUG] 📝 Raw response: {response.text}")
                     return False
                 else:
                     print("❌ Command failed or returned error")
-                    print(f"📝 Raw response: {response.text}")
+                    if self.debug:
+                        print(f"[DEBUG] 📝 Raw response: {response.text}")
                     return False
             else:
                 print(f"❌ HTTP error {response.status_code}: {response.text}")
@@ -433,7 +437,6 @@ class ZebraIoTCClient:
         This function initiates a connection to the IoT Connector cloud service.
         """
         print("🔄 Connecting reader to IoT Connector...")
-        print("⏳ This may take a few minutes, please wait...")
         
         connect_command = (
             f"{self.cmd_header}"
@@ -558,9 +561,8 @@ class ZebraIoTCClient:
         Adds a WebSocket Endpoint (WSEP) to the reader named "PDWC".
         """
         print("[DEBUG] Adding WS endpoint..")
-        
-        # Exact replica of the JavaScript wsEpConfig configuration
-        # Modification: use "ws" instead of "wss" for HTTP compatibility
+
+        # Use "ws" instead of "wss" for HTTP compatibility
         ws_ep_config = {
             "name": "WS",
             "description": "WS Test", 

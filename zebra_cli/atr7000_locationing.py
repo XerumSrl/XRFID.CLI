@@ -69,11 +69,11 @@ class PlotDataSerie:
 class ATR7000PositionCalculator:
     """Position calculator based on RAW_DIRECTIONALITY messages"""
     
-    def __init__(self, reader_height: float = 3.0, tag_height: float = 0.0):
+    def __init__(self, reader_height: float = 15.0, tag_height: float = 3.0):
         """
         Args:
-            reader_height: Reader height in meters (default 3.0m)
-            tag_height: Tag height in meters (default 0.0m)
+            reader_height: Reader height in meters (default 15.0m)
+            tag_height: Tag height in meters (default 3.0m)
         """
         self.reader_height = reader_height
         self.tag_height = tag_height
@@ -85,7 +85,6 @@ class ATR7000PositionCalculator:
     def calculate_position(self, raw_data: RawDirectionalityMessage) -> PositionPoint:
         """
         Calculates the Cartesian position from RAW_DIRECTIONALITY data
-        Based on the provided C# code
         """
         # Calculate the object's height
         object_height = self.reader_height - self.tag_height
@@ -318,7 +317,7 @@ class ATR7000LocationPlotter:
             if self.debug:
                 print("[DEBUG][ATR7000LocationPlotter] Plot window opened - monitoring positions...")
 
-            def update_plot():
+            def update_plot(frame):
                 if stop_event.is_set():
                     plt.close('all')
                     return []
